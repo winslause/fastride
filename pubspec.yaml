@@ -1,0 +1,154 @@
+name: fastride
+description: "FastRide — a deterministic, worldwide ride-hailing platform."
+# Prevents accidental publication to pub.dev.
+publish_to: 'none'
+
+# version: <major>.<minor>.<patch>+<build>
+# Android: versionName / versionCode
+# iOS:     CFBundleShortVersionString / CFBundleVersion
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+# =========================================================================
+# DEPENDENCIES
+# =========================================================================
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # --- Icons -------------------------------------------------------------
+  cupertino_icons: ^1.0.8
+
+  # --- Networking --------------------------------------------------------
+  # HTTP client for backend REST, OSRM routing, and OSM geocoding.
+  http: ^1.2.2
+
+  # Persistent duplex socket for live driver telemetry and ride events.
+  web_socket_channel: ^3.0.1
+
+  # --- Maps & geospatial -------------------------------------------------
+  # Pure-Dart map widget — OSM tiles, no API key, no billing.
+  flutter_map: ^7.0.2
+
+  # LatLng type used by flutter_map and shared across the app.
+  latlong2: ^0.9.1
+
+  # --- Location & permissions -------------------------------------------
+  # GPS hardware access (foreground + background).
+  geolocator: ^13.0.1
+
+  # Fine-grained runtime permissions (locationAlways, notifications, etc.).
+  permission_handler: ^11.3.1
+
+  # --- UI polish ---------------------------------------------------------
+  # Better back-gesture handling, PopScope is in SDK but for adaptive
+  # components and animated transitions this stays handy in real builds.
+  # (Optional — remove if you prefer to keep dependencies minimal.)
+  # flutter_svg: ^2.0.13
+
+  # Shimmer skeletons for loading states (used in real screens later).
+  shimmer: ^3.0.0
+
+  # Localization / intl helpers (dates, numbers, currency formatting).
+  intl: ^0.19.0
+
+  # Persistent key-value store for auth tokens, recent searches, settings.
+  shared_preferences: ^2.3.2
+
+  # Secure storage for JWT / refresh tokens (Keychain / Keystore).
+  flutter_secure_storage: ^9.2.2
+
+  # --- Utilities ---------------------------------------------------------
+  # UUID generation for client-side optimistic IDs.
+  uuid: ^4.5.1
+
+  # URL launcher — "call driver", "open in maps", "privacy policy".
+  url_launcher: ^6.3.1
+
+  # Connectivity — distinguishes "no wifi" from "no internet".
+  connectivity_plus: ^6.0.5
+
+  # Cross-platform path helpers (for secure storage and caching).
+  path_provider: ^2.1.5
+
+# =========================================================================
+# DEV DEPENDENCIES
+# =========================================================================
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  # Recommended lint set.
+  flutter_lints: ^6.0.0
+
+# =========================================================================
+# FLUTTER
+# =========================================================================
+flutter:
+  uses-material-design: true
+
+  # --- Assets ------------------------------------------------------------
+  # Uncomment and populate as you add real assets.
+  # assets:
+  #   - assets/images/
+  #   - assets/icons/
+  #   - assets/lottie/
+
+  # --- Fonts -------------------------------------------------------------
+  # Recommended worldwide font: Inter (excellent Latin, Cyrillic, Greek).
+  # Pair with a script fallback for CJK / Arabic when you localize.
+  #
+  # fonts:
+  #   - family: Inter
+  #     fonts:
+  #       - asset: assets/fonts/Inter-Regular.ttf
+  #         weight: 400
+  #       - asset: assets/fonts/Inter-Medium.ttf
+  #         weight: 500
+  #       - asset: assets/fonts/Inter-SemiBold.ttf
+  #         weight: 600
+  #       - asset: assets/fonts/Inter-Bold.ttf
+  #         weight: 700
+  #       - asset: assets/fonts/Inter-ExtraBold.ttf
+  #         weight: 800
+
+# =========================================================================
+# NOTES
+# =========================================================================
+# 1. `flutter pub upgrade --major-versions` to bring everything current,
+#    then re-run `flutter analyze` to catch any breaking API changes.
+#
+# 2. Platform config required by these packages:
+#    • Android (android/app/src/main/AndroidManifest.xml):
+#        <uses-permission android:name="android.permission.INTERNET" />
+#        <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+#        <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+#        <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+#        <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+#        <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+#        <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+#        <uses-permission android:name="android.permission.WAKE_LOCK" />
+#
+#    • iOS (ios/Runner/Info.plist):
+#        NSLocationWhenInUseUsageDescription
+#        NSLocationAlwaysAndWhenInUseUsageDescription
+#        NSLocationAlwaysUsageDescription  (legacy but safe to include)
+#        UIBackgroundModes → location, fetch, remote-notification
+#
+# 3. `shared_preferences` and `flutter_secure_storage` are wired in for
+#    the next iteration: auth token storage, recent destination caching,
+#    and driver settings persistence.
+#
+# 4. `shimmer` is intended for the loading skeletons on the destination
+#    search and matching sheets once the real backend is live.
+#
+# 5. `intl` is used the moment you introduce real multi-language support
+#    or per-market number/date formatting (KSh 1,200 vs $12.00 etc.).
+#
+# 6. `connectivity_plus` is used by ApiClient's retry logic once you want
+#    to short-circuit requests when the device is fully offline.
+#
+# 7. `uuid` and `path_provider` are utilities for future work — safe to
+#    keep, tiny footprint, and used by nearly every production app.
