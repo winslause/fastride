@@ -6,6 +6,8 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../core/api_client.dart';
 import '../core/location_service.dart';
 import '../core/websocket_client.dart';
@@ -79,7 +81,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
     _api = ApiClient(
       baseUrl: const String.fromEnvironment(
         'API_BASE_URL',
-        defaultValue: 'https://api.example.com/v1',
+        defaultValue: 'http://127.0.0.1:8000',
       ),
       osrmBaseUrl: const String.fromEnvironment(
         'OSRM_BASE_URL',
@@ -128,38 +130,40 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       return;
     }
 
-    final last = await _location.lastKnown();
-    if (last != null && mounted) {
-      final here = LatLng(last.latitude, last.longitude);
-      setState(() {
-        _center = here;
-        _pickup = here;
-        _pickupLocation = RideLocation(
-          lat: last.latitude,
-          lng: last.longitude,
-          placeName: 'Current location',
-        );
-      });
-      _safeMove(here);
-    }
-
+    Position? position = await _location.lastKnown();
     _posSub = _location.positionStream().listen((pos) {
       if (!mounted) return;
-      final here = LatLng(pos.latitude, pos.longitude);
-      setState(() {
-        _center = here;
-        // Only auto-follow when the rider has no active ride.
-        if (_state == RiderState.draft) {
-          _pickup = here;
-          _pickupLocation = RideLocation(
-            lat: pos.latitude,
-            lng: pos.longitude,
-            placeName: 'Current location',
-          );
-        }
-      });
-      if (_state == RiderState.draft) _safeMove(here);
+      _applyPosition(pos, follow: _state == RiderState.draft);
     });
+
+    if (position != null && mounted) {
+      _applyPosition(position, follow: true);
+    } else if (mounted) {
+      _location.current(timeout: const Duration(seconds: 8)).then((
+        currentPosition,
+      ) {
+        if (!mounted || currentPosition == null || _state != RiderState.draft) {
+          return;
+        }
+        _applyPosition(currentPosition, follow: true);
+      });
+    }
+  }
+
+  void _applyPosition(Position position, {required bool follow}) {
+    final here = LatLng(position.latitude, position.longitude);
+    setState(() {
+      _center = here;
+      if (follow || _pickup == null) {
+        _pickup = here;
+        _pickupLocation = RideLocation(
+          lat: position.latitude,
+          lng: position.longitude,
+          placeName: 'Current location',
+        );
+      }
+    });
+    if (follow) _safeMove(here);
   }
 
   void _safeMove(LatLng target, {double? zoom}) {
@@ -595,7 +599,14 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       elevation: 2,
       child: InkWell(
         customBorder: const CircleBorder(),
-        onTap: () => _toast('Profile coming soon'),
+        onTap: () async {
+          final prefs = await SharedPreferences.getInstance();
+          if (prefs.getString('fastride.auth.user') == null) {
+            _toast('Sign in to continue');
+            return;
+          }
+          Navigator.of(context).pushReplacementNamed('/rider');
+        },
         child: Padding(
           padding: const EdgeInsets.all(10),
           child: Icon(
@@ -712,7 +723,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
             ),
             NavigationBar(
               selectedIndex: _navIndex,
-              onDestinationSelected: (i) {
+              onDestinationSelected: (i) async {
                 HapticFeedback.selectionClick();
                 setState(() => _navIndex = i);
                 switch (i) {
@@ -721,7 +732,12 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
                   case 2:
                     _toast('Wallet and payments coming soon');
                   case 3:
-                    _toast('Profile coming soon');
+                    final prefs = await SharedPreferences.getInstance();
+                    if (prefs.getString('fastride.auth.user') == null) {
+                      _toast('Sign in to continue');
+                      return;
+                    }
+                    Navigator.of(context).pushReplacementNamed('/rider');
                 }
               },
               destinations: const [

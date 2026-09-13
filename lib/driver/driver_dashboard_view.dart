@@ -6,6 +6,8 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../core/api_client.dart';
 import '../core/location_service.dart';
 import '../core/websocket_client.dart';
@@ -58,7 +60,7 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
     _api = ApiClient(
       baseUrl: const String.fromEnvironment(
         'API_BASE_URL',
-        defaultValue: 'https://api.example.com/v1',
+        defaultValue: 'http://127.0.0.1:8000',
       ),
       osrmBaseUrl: const String.fromEnvironment(
         'OSRM_BASE_URL',
@@ -535,7 +537,14 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
       elevation: 2,
       child: InkWell(
         customBorder: const CircleBorder(),
-        onTap: () => _toast('Profile coming soon'),
+        onTap: () async {
+          final prefs = await SharedPreferences.getInstance();
+          if (prefs.getString('fastride.auth.user') == null) {
+            _toast('Sign in to continue');
+            return;
+          }
+          Navigator.of(context).pushReplacementNamed('/driver');
+        },
         child: Padding(
           padding: const EdgeInsets.all(10),
           child: Icon(
@@ -685,7 +694,7 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
             ),
             NavigationBar(
               selectedIndex: _navIndex,
-              onDestinationSelected: (i) {
+              onDestinationSelected: (i) async {
                 HapticFeedback.selectionClick();
                 setState(() => _navIndex = i);
                 switch (i) {
@@ -698,7 +707,12 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
                   case 2:
                     _toast('Vehicle & documents coming soon');
                   case 3:
-                    _toast('Profile coming soon');
+                    final prefs = await SharedPreferences.getInstance();
+                    if (prefs.getString('fastride.auth.user') == null) {
+                      _toast('Sign in to continue');
+                      return;
+                    }
+                    Navigator.of(context).pushReplacementNamed('/driver');
                 }
               },
               destinations: const [

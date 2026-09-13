@@ -3,6 +3,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 
 import 'theme.dart';
+import 'feature/auth/auth_gate.dart';
+import 'feature/auth/login_screen.dart';
+import 'feature/auth/register_screen.dart';
 import 'rider/rider_dashboard_view.dart';
 import 'driver/driver_dashboard_view.dart';
 
@@ -105,7 +108,7 @@ class _RideAppState extends State<RideApp> with WidgetsBindingObserver {
       // --- Navigation ---
       navigatorKey: navigatorKey,
       scaffoldMessengerKey: scaffoldMessengerKey,
-      initialRoute: AppRoutes.rider,
+      initialRoute: AppRoutes.auth,
       onGenerateRoute: AppRouter.onGenerateRoute,
 
       // --- Accessibility & UX polish ---
@@ -129,14 +132,24 @@ class _RideAppState extends State<RideApp> with WidgetsBindingObserver {
 
 /// Centralised route names — no magic strings anywhere else in the app.
 abstract final class AppRoutes {
+  static const String auth = '/auth';
+  static const String login = '/auth/login';
+  static const String register = '/auth/register';
   static const String rider = '/rider';
   static const String driver = '/driver';
+  static const String profile = '/profile';
 }
 
 /// Route generator — keeps navigation declarative and centralised.
 abstract final class AppRouter {
   static Route<dynamic> onGenerateRoute(RouteSettings settings) {
     switch (settings.name) {
+      case AppRoutes.auth:
+        return _fadeRoute(const AuthGate());
+      case AppRoutes.login:
+        return _fadeRoute(const LoginScreen());
+      case AppRoutes.register:
+        return _fadeRoute(const RegisterScreen());
       case AppRoutes.rider:
         return _fadeRoute(const RiderDashboardView());
       case AppRoutes.driver:

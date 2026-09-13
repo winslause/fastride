@@ -1,0 +1,1 @@
+when i open the app, it should request location permision and point my location on the map.  when i click where to and go to the input,  as i put type my location, there should be a dropdown of the locations as i type so that i can pick from the dropdown.  then when iselect it,  my location route should be showing on my map from my starting point to my destination
