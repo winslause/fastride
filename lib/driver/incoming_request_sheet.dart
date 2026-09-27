@@ -444,7 +444,7 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
                       ),
                     ),
                     Text(
-                      '${o.currency} ${o.payout.toStringAsFixed(2)}',
+                      '${o.currency} ${o.displayPayout.toStringAsFixed(2)}',
                       style: theme.textTheme.displaySmall?.copyWith(
                         fontWeight: FontWeight.w800,
                         color: AppTheme.success,

@@ -850,6 +850,22 @@ class RideOffer {
     );
   }
 
+  /// The amount to show the driver.
+  ///
+  /// Normally this is the fare the backend quoted for the trip. If that ever
+  /// arrives as zero — an offer summary with no fare, or a quote built from a
+  /// rate card the driver has not set up — fall back to pricing the trip
+  /// locally with the same formula the backend uses, so the sheet never shows
+  /// a total of 0.00.
+  double get displayPayout {
+    if (payout > 0) return payout;
+    final quoted = pricing.quote(
+      distanceMeters: distanceMeters,
+      durationSeconds: durationSeconds,
+    );
+    return quoted > 0 ? quoted : 0;
+  }
+
   /// One-line explanation of the total, e.g.
   /// `Base 50 + 8.4 km × 30 + 12 min × 3`.
   String get priceBreakdown {

@@ -199,6 +199,26 @@ def main():
         ON rides(state, created_at)
     """)
 
+    # --- Ratings -------------------------------------------------------------
+    # One rating per ride, written by the rider once the driver completes it.
+    # The reason column is free text — a single line of feedback.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ratings (
+            id VARCHAR(36) PRIMARY KEY,
+            ride_id VARCHAR(36) NOT NULL UNIQUE REFERENCES rides(id) ON DELETE CASCADE,
+            rider_id VARCHAR(36) NOT NULL REFERENCES users(id),
+            driver_id VARCHAR(36) REFERENCES drivers(id),
+            stars SMALLINT NOT NULL,
+            reason TEXT,
+            created_at TIMESTAMP NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ratings_driver
+        ON ratings(driver_id, created_at DESC)
+    """)
+
     cur.close()
     conn.close()
     print("Tables created successfully.")

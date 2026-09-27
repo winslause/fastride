@@ -410,6 +410,8 @@ abstract final class AppConstants {
   /// Rider matching timeout (see project spec — 60 seconds).
   static const Duration matchingTimeout = Duration(seconds: 60);
 
-  /// Driver request countdown (see project spec — 15 seconds).
-  static const Duration requestCountdown = Duration(seconds: 15);
+  /// Driver request countdown. Long enough for a driver who is pulling over to
+  /// read the pickup and work out whether they want the fare, without letting
+  /// a queue of requests build up.
+  static const Duration requestCountdown = Duration(seconds: 30);
 }

@@ -119,9 +119,13 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
         defaultValue: 'https://photon.komoot.io',
       ),
     );
-    _location = LocationService();
-    _bootstrap();
-  }
+      _location = LocationService();
+      // Built synchronously, before the first frame: the top bar and profile
+      // card read `_auth.user` during that frame, and a `late` field assigned
+      // after an await throws LateInitializationError.
+      _auth = AuthService(api: _api);
+      _bootstrap();
+    }
 
   @override
   void dispose() {
@@ -160,13 +164,16 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
   // =========================================================================
 
   Future<void> _bootstrap() async {
+    // Only the position cache needs this; `_auth` is already built and loads
+    // its own preferences.
     _prefs = await SharedPreferences.getInstance();
-    _auth = AuthService(api: _api, preferences: _prefs);
+    if (!mounted) return;
     await _auth.initialize();
+    if (!mounted) return;
 
     // 1. Paint immediately from cache so the dashboard is never blank.
     _restoreFromCache();
-    if (mounted) setState(() {});
+    setState(() {});
 
     // 2. Location — the marker must appear even before a live GPS fix.
     unawaited(_initLocation());
@@ -843,7 +850,7 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
       dropoff: offer.dropoff,
       distanceMeters: offer.distanceMeters,
       durationSeconds: offer.durationSeconds,
-      fareEstimate: offer.payout,
+      fareEstimate: offer.displayPayout,
       currency: offer.currency,
       otp: offer.otp,
       acceptedAt: DateTime.now(),
@@ -885,12 +892,13 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
       await EarningsSummarySheet.show(
         context: context,
         todayTrips: stats?.todayRides ?? 1,
-        todayEarnings: stats?.todayEarnings ?? offer.payout,
+        todayEarnings: stats?.todayEarnings ?? offer.displayPayout,
         lastTrip: ride.copyWith(
           state: RideState.completed,
           completedAt: DateTime.now(),
-          fareFinal: offer.payout,
+          fareFinal: offer.displayPayout,
         ),
+        currency: offer.currency.isEmpty ? 'KES' : offer.currency,
       );
     }
   }
@@ -1385,7 +1393,21 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
     );
   }
 
-  String _money(double value) => 'KSh ${value.toStringAsFixed(0)}';
+  /// Earnings are shown in whatever the driver's rate card is priced in,
+  /// rather than a currency hardcoded into the UI.
+  String _money(double value) {
+    final code = (_profile?.pricing.currency ?? 'KES').trim().toUpperCase();
+    final symbol = switch (code) {
+      'KES' || 'KSH' => 'KSh ',
+      'USD' => '\$',
+      'EUR' => '€',
+      'GBP' => '£',
+      'NGN' => '₦',
+      'UGX' || 'TZS' => '',
+      _ => '${_profile?.pricing.currency ?? 'KES'} ',
+    };
+    return '$symbol${value.toStringAsFixed(0)}';
+  }
 
   Widget _statTile(
     ColorScheme scheme, {
@@ -1676,6 +1698,7 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
                 context: context,
                 todayTrips: stats?.todayRides ?? 0,
                 todayEarnings: stats?.todayEarnings ?? 0,
+                currency: _profile?.pricing.currency ?? 'KES',
               ),
             ),
           ),

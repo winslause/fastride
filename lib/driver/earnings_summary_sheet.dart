@@ -23,6 +23,7 @@ class EarningsSummarySheet extends StatefulWidget {
     this.todayTrips = 0,
     this.todayEarnings = 0,
     this.lastTrip,
+    this.currency = 'KES',
   });
 
   final int todayTrips;
@@ -31,11 +32,16 @@ class EarningsSummarySheet extends StatefulWidget {
   /// Populated when the sheet is shown right after a trip ends.
   final RideModel? lastTrip;
 
+  /// ISO code from the driver's rate card. Kenyan shillings unless the driver
+  /// has priced their rides in something else.
+  final String currency;
+
   static Future<void> show({
     required BuildContext context,
     int todayTrips = 0,
     double todayEarnings = 0,
     RideModel? lastTrip,
+    String currency = 'KES',
   }) {
     return AppSheet.show<void>(
       context: context,
@@ -44,6 +50,7 @@ class EarningsSummarySheet extends StatefulWidget {
         todayTrips: todayTrips,
         todayEarnings: todayEarnings,
         lastTrip: lastTrip,
+        currency: currency,
       ),
     );
   }
@@ -184,8 +191,7 @@ class _EarningsSummarySheetState extends State<EarningsSummarySheet>
                   earnings: _monthEarnings,
                   trips: _monthTrips,
                   label: 'This month',
-                ),
-              ],
+                ),              ],
             ),
           ),
         ],
@@ -357,7 +363,7 @@ class _EarningsSummarySheetState extends State<EarningsSummarySheet>
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '\$${earnings.toStringAsFixed(2)}',
+                  _cash(earnings),
                   style: theme.textTheme.displaySmall?.copyWith(
                     color: scheme.onPrimary,
                     fontWeight: FontWeight.w800,
@@ -388,7 +394,7 @@ class _EarningsSummarySheetState extends State<EarningsSummarySheet>
                   scheme,
                   icon: Icons.trending_up_rounded,
                   label: 'Avg / trip',
-                  value: '\$${avg.toStringAsFixed(2)}',
+                  value: _cash(avg),
                 ),
               ),
             ],
@@ -463,6 +469,26 @@ class _EarningsSummarySheetState extends State<EarningsSummarySheet>
         ],
       ),
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // Money
+  // -------------------------------------------------------------------------
+
+  /// Money as the driver should read it. Kenyan shillings use the `KSh`
+  /// prefix; anything else falls back to the code the rate card carries.
+  String _cash(double amount) {
+    final code = widget.currency.trim().toUpperCase();
+    final symbol = switch (code) {
+      'KES' || 'KSH' => 'KSh ',
+      'USD' => '\$',
+      'EUR' => '€',
+      'GBP' => '£',
+      'NGN' => '₦',
+      'UGX' || 'TZS' => '',
+      _ => '${widget.currency.trim()} ',
+    };
+    return '$symbol${amount.toStringAsFixed(2)}';
   }
 
   Widget _stat(

@@ -113,7 +113,10 @@ class _NavigationSheetState extends State<NavigationSheet> {
   static const double _almostThereMeters = 100;
 
   /// Straight-line metres left to the target, refreshed with the rider pin.
-  double _remaining = double.infinity;
+  /// Null means "not known yet" — a plain `double` sentinel cannot express that
+  /// safely, because a field added by a hot reload starts life as null and
+  /// reading `.isFinite` off it throws instead of showing the placeholder.
+  double? _remaining;
 
   @override
   void initState() {
@@ -930,8 +933,8 @@ class _NavigationSheetState extends State<NavigationSheet> {
     final label = _stage == NavigationStage.toPickup ? 'Pickup' : 'Dropoff';
     final distance = _loadingRoute
         ? '…'
-        : _remaining.isFinite
-            ? _fmtDistance(_remaining)
+        : _remaining != null
+            ? _fmtDistance(_remaining!)
             : '—';
 
     return GestureDetector(
@@ -1003,8 +1006,8 @@ class _NavigationSheetState extends State<NavigationSheet> {
           const SizedBox(width: AppTheme.spaceSm),
           Expanded(
             child: Text(
-              _remaining.isFinite
-                  ? 'Almost there — ${_fmtDistance(_remaining)} away'
+              _remaining != null
+                  ? 'Almost there — ${_fmtDistance(_remaining!)} away'
                   : 'Almost there',
               style: theme.textTheme.bodyMedium?.copyWith(
                 fontWeight: FontWeight.w800,
@@ -1034,8 +1037,8 @@ class _NavigationSheetState extends State<NavigationSheet> {
         ? '…'
         : routed > 0
             ? _fmtDistance(routed)
-            : _remaining.isFinite
-                ? _fmtDistance(_remaining)
+            : _remaining != null
+                ? _fmtDistance(_remaining!)
                 : '—';
 
     return Row(

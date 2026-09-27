@@ -5,13 +5,14 @@ import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
 import '../core/api_client.dart';
 import '../core/auth_service.dart';
 import '../core/location_service.dart';
 import '../core/websocket_client.dart';
+// Also imported with a prefix: this file has its own `RiderState` for the
+// on-screen flow, which would otherwise shadow the ride model's `RideState`.
 import '../models/ride_model.dart';
+import '../models/ride_model.dart' as ride_model;
 import '../shared/map_zoom_controls.dart';
 import '../theme.dart';
 import 'active_trip_sheet.dart';
@@ -21,6 +22,7 @@ import 'help_screen.dart';
 import 'matching_sheet.dart';
 import 'profile_screen.dart' show showChangePasswordDialog, showEditProfile;
 import 'promotions_screen.dart';
+import 'rating_sheet.dart';
 import 'safety_screen.dart';
 import 'wallet_screen.dart';
 
@@ -77,11 +79,33 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   /// a trip interrupted by signing out is not lost.
   RideModel? _resumableRide;
 
+  /// The ride the dashboard itself is tracking, either the one being resumed or
+  /// the one currently running. The driver moves it along, so the dashboard
+  /// has to keep checking or this screen keeps showing a finished trip.
+  RideModel? get _watchedRide => _ride ?? _resumableRide;
+
+  /// Only the states the backend will hand back from `/rides/active`.
+  bool get _isResumableState => switch (_resumableRide?.state) {
+        RideState.requested ||
+        RideState.matching ||
+        RideState.accepted ||
+        RideState.driverArriving ||
+        RideState.driverArrived ||
+        RideState.ongoing =>
+          true,
+        _ => false,
+      };
+
+  /// The live trip sheet runs its own polling; two pollers on the same ride
+  /// would race to reset the dashboard.
+  bool _tripSheetOpen = false;
+
   // --- Streams --------------------------------------------------------------
   StreamSubscription<Position>? _posSub;
   StreamSubscription<WsEvent>? _wsSub;
   StreamSubscription<WsStatus>? _wsStatusSub;
   Timer? _locationSyncTimer;
+  Timer? _rideWatchTimer;
 
   // --- UI state -------------------------------------------------------------
   int _navIndex = 0;
@@ -116,6 +140,11 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       ),
     );
     _location = LocationService();
+    // Built synchronously, before the first frame. The first build already
+    // reads `_auth.user` for the avatar and wallet chip, and a `late` field
+    // assigned after an await throws LateInitializationError on that frame.
+    // `AuthService` resolves its own preferences inside `initialize()`.
+    _auth = AuthService(api: _api);
     _bootstrap();
   }
 
@@ -123,6 +152,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _locationSyncTimer?.cancel();
+    _rideWatchTimer?.cancel();
     _posSub?.cancel();
     _wsSub?.cancel();
     _wsStatusSub?.cancel();
@@ -144,11 +174,12 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   // =========================================================================
 
   Future<void> _bootstrap() async {
-    _auth = AuthService(
-      api: _api,
-      preferences: await SharedPreferences.getInstance(),
-    );
     await _auth.initialize();
+    if (!mounted) return;
+    // The signed-in user only exists once initialize() has read the token and
+    // the cached profile, so the first frames render placeholders. Rebuild to
+    // fill in the avatar, name and wallet.
+    setState(() {});
 
     final status = await _location.ensureReady();
     if (!mounted) return;
@@ -237,6 +268,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
           ride.dropoffPlace ?? 'Unknown destination',
           ride.displayFare,
           icon,
+          ride_model.RideStateX.fromString(ride.state),
         ));
       }
       if (!mounted) return;
@@ -482,6 +514,59 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
     } catch (_) {
       // No ride, or the network is down. The home screen is unaffected.
     }
+
+    _syncRideWatch();
+  }
+
+  /// Watch the ride the dashboard is tracking. The driver is the one who moves
+  /// it to `completed`, so without this the card would sit on the map showing
+  /// a trip that had already finished.
+  void _syncRideWatch() {
+    final wanted = _tripSheetOpen ? null : _watchedRide?.id;
+    if (wanted == null) {
+      _rideWatchTimer?.cancel();
+      _rideWatchTimer = null;
+      return;
+    }
+
+    _rideWatchTimer?.cancel();
+    _rideWatchTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _pollWatchedRide(wanted),
+    );
+  }
+
+  Future<void> _pollWatchedRide(String rideId) async {
+    if (!mounted) return;
+    if (_tripSheetOpen) return;
+    if (_watchedRide?.id != rideId) return;
+
+    try {
+      final fresh = await _api.getRide(rideId);
+      if (!mounted || _tripSheetOpen) return;
+      if (_watchedRide?.id != rideId) return;
+
+      if (fresh.state == RideState.completed ||
+          fresh.state == RideState.cancelled) {
+        _rideWatchTimer?.cancel();
+        _rideWatchTimer = null;
+        _toast(fresh.state == RideState.completed
+            ? 'Trip completed. Thanks for riding with us!'
+            : 'Ride ${fresh.state.label.toLowerCase()}.');
+        _resetToIdle();
+        // "My rides" is a snapshot from sign-in, so without this the ride the
+        // driver just finished would still read as in progress in the list.
+        _loadRecents();
+        if (fresh.state == RideState.completed) _promptForRating(fresh);
+        return;
+      }
+
+      if (_resumableRide?.id == rideId) {
+        setState(() => _resumableRide = fresh);
+      }
+    } catch (_) {
+      // A dropped poll is not fatal; the next tick retries.
+    }
   }
 
   /// Take the rider back onto the map for [ride]: draw the route, frame it, and
@@ -537,24 +622,55 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
 
   Future<void> _openActiveTripSheet(RideModel ride) async {
     if (!mounted) return;
+    _tripSheetOpen = true;
+    _syncRideWatch();
     final outcome = await ActiveTripSheet.show(
       context: context,
       ride: ride,
       api: _api,
     );
-
+    _tripSheetOpen = false;
     if (!mounted) return;
+    _syncRideWatch();
 
     switch (outcome) {
       case ActiveTripOutcome.completed:
         _toast('Thanks for riding with us!');
         _resetToIdle();
+        _loadRecents();
+        _promptForRating(ride);
       case ActiveTripOutcome.cancelled:
         _toast('Ride cancelled.');
         _resetToIdle();
+        _loadRecents();
       case null:
         break;
     }
+  }
+
+  /// Ask the rider to rate the driver once the trip is done.
+  ///
+  /// Skipped when the ride has no driver, or when this ride has already been
+  /// rated — otherwise every trip would nag again on the next app launch.
+  Future<void> _promptForRating(RideModel ride) async {
+    if (!mounted) return;
+
+    final driverName = ride.driver?.fullName.trim();
+    if (driverName == null || driverName.isEmpty) return;
+
+    try {
+      if (await _api.hasRated(ride.id)) return;
+    } catch (_) {
+      // If we cannot tell, still ask once rather than silently never asking.
+    }
+
+    if (!mounted) return;
+    await RatingSheet.show(
+      context: context,
+      api: _api,
+      rideId: ride.id,
+      driverName: driverName,
+    );
   }
 
   void _resetToIdle() {
@@ -567,6 +683,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       _resumableRide = null;
       _followingUser = true;
     });
+    _syncRideWatch();
     if (_pickup != null) _safeMove(_pickup!, zoom: 15);
   }
 
@@ -631,9 +748,11 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       children: [
         _buildMap(),
         _buildTopBar(isWide: isWide),
-        _buildMapControls(isWide: isWide),
         if (_state == RiderState.draft) _buildIdleOverlay(isWide: isWide),
         _buildBottomArea(),
+        // Last, so the map controls always sit above the recents strip and the
+        // bottom panel instead of underneath them.
+        _buildMapControls(),
       ],
     );
   }
@@ -733,11 +852,38 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       separatorBuilder: (_, __) => const SizedBox(height: AppTheme.spaceMd),
       itemBuilder: (_, i) {
         final r = _recents[i];
+        final stateColor = _stateColor(r.state, scheme);
         return Card(
           child: ListTile(
             leading: Icon(r.icon, size: 32, color: scheme.primary),
             title: Text(r.from, style: theme.textTheme.titleMedium),
-            subtitle: Text(r.to, style: theme.textTheme.bodySmall),
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(r.to, style: theme.textTheme.bodySmall),
+                const SizedBox(height: 4),
+                // Whether the driver finished the trip, not whether the rider
+                // got round to tapping anything.
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: stateColor.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(AppTheme.radiusPill),
+                  ),
+                  child: Text(
+                    r.state.label,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: stateColor,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
             trailing: Text(
               r.price,
               style: theme.textTheme.titleMedium?.copyWith(
@@ -753,6 +899,22 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
         );
       },
     );
+  }
+
+  Color _stateColor(ride_model.RideState state, ColorScheme scheme) {
+    return switch (state) {
+      ride_model.RideState.completed => AppTheme.success,
+      ride_model.RideState.cancelled || ride_model.RideState.expired =>
+        AppTheme.danger,
+      ride_model.RideState.requested ||
+      ride_model.RideState.matching ||
+      ride_model.RideState.accepted ||
+      ride_model.RideState.driverArriving ||
+      ride_model.RideState.driverArrived ||
+      ride_model.RideState.ongoing =>
+        AppTheme.info,
+      _ => scheme.onSurfaceVariant,
+    };
   }
 
   Widget _buildSettingsContent(ThemeData theme, ColorScheme scheme) {
@@ -1613,23 +1775,33 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   // MAP CONTROLS
   // -------------------------------------------------------------------------
 
-  Widget _buildMapControls({required bool isWide}) {
+  Widget _buildMapControls() {
+    // Kept in the clear space under the top bar rather than near the bottom:
+    // the recents strip and the resume card are full width, opaque and
+    // scrollable, so anything sitting in that band has its taps swallowed
+    // before the button ever sees them.
     return Positioned(
       right: AppTheme.spaceLg,
-      bottom: isWide ? 240 : 300,
-      child: Column(
-        children: [
-          MapZoomControls(controller: _mapController),
-          const SizedBox(height: AppTheme.spaceSm),
-          _mapControlButton(
-            icon: _followingUser
-                ? Icons.my_location_rounded
-                : Icons.location_searching_rounded,
-            tooltip: 'Recenter',
-            onTap: _recenterOnUser,
-            highlighted: _followingUser,
+      top: 0,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.only(top: 72),
+          child: Column(
+            children: [
+              MapZoomControls(controller: _mapController),
+              const SizedBox(height: AppTheme.spaceSm),
+              _mapControlButton(
+                icon: _followingUser
+                    ? Icons.my_location_rounded
+                    : Icons.location_searching_rounded,
+                tooltip: 'Recenter',
+                onTap: _recenterOnUser,
+                highlighted: _followingUser,
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -1667,6 +1839,9 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   // IDLE OVERLAY
   // -------------------------------------------------------------------------
 
+  /// Only the resume card lives over the map. The recent-trips strip used to
+  /// float here too, but it duplicated the "My rides" tab and covered a third
+  /// of the map, so the map is left clear.
   Widget _buildIdleOverlay({required bool isWide}) {
     return Positioned(
       left: AppTheme.spaceLg,
@@ -1675,17 +1850,17 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
-         children: [
-           _resumeTripCard(),
-           _recentStrip(),
-         ],
-       ),
-     );
-   }
+        children: [_resumeTripCard()],
+      ),
+    );
+  }
 
   /// Shown when this account still has a trip in progress — for example after
   /// signing out mid-ride. Tapping it puts the rider back on the map.
   Widget _resumeTripCard() {
+    // Belt and braces: the watcher clears the card as soon as the ride ends,
+    // but never draw one for a ride that is already finished.
+    if (!_isResumableState) return const SizedBox.shrink();
     final ride = _resumableRide;
     if (ride == null) return const SizedBox.shrink();
 
@@ -1767,104 +1942,6 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
             ),
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _recentStrip() {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-
-    if (_recentsLoading) {
-      return const SizedBox(
-        height: 96,
-        child: Center(child: CircularProgressIndicator()),
-      );
-    }
-
-    if (_recentsError != null) {
-      return const SizedBox(height: 1, child: SizedBox.shrink());
-    }
-
-    if (_recents.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return SizedBox(
-      height: 96,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: _recents.length,
-        separatorBuilder: (_, __) => const SizedBox(width: AppTheme.spaceMd),
-        itemBuilder: (_, i) {
-          final r = _recents[i];
-          return InkWell(
-            borderRadius: BorderRadius.circular(AppTheme.radiusLg),
-            onTap: () {
-              HapticFeedback.selectionClick();
-              _toast('Opening "${r.from} → ${r.to}"');
-            },
-            child: Container(
-              width: 200,
-              padding: const EdgeInsets.all(AppTheme.spaceMd),
-              decoration: BoxDecoration(
-                color: scheme.surface,
-                borderRadius: BorderRadius.circular(AppTheme.radiusLg),
-                boxShadow: AppTheme.softShadow,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(r.icon, size: 16, color: scheme.primary),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          r.from,
-                          style: theme.textTheme.labelMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.place_rounded,
-                        size: 14,
-                        color: scheme.onSurfaceVariant,
-                      ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          r.to,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: scheme.onSurfaceVariant,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const Spacer(),
-                  Text(
-                    r.price,
-                    style: theme.textTheme.labelLarge?.copyWith(
-                      fontWeight: FontWeight.w800,
-                      color: scheme.primary,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
       ),
     );
   }
@@ -1994,9 +2071,13 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
 enum RiderState { draft, searching, pricing, matching, trip }
 
 class _RecentTrip {
-  const _RecentTrip(this.from, this.to, this.price, this.icon);
+  const _RecentTrip(this.from, this.to, this.price, this.icon, this.state);
   final String from;
   final String to;
   final String price;
   final IconData icon;
+
+  /// Kept so "My rides" can show whether the driver finished the trip. The
+  /// rider does not set this — the driver does — so the list has to reflect it.
+  final ride_model.RideState state;
 }

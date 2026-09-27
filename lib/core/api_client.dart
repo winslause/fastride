@@ -506,7 +506,46 @@ class ApiClient {
     return RideModel.fromJson(json.cast<String, dynamic>());
   }
 
-  /// Ride requests currently waiting on the signed-in driver.
+  /// Rate the driver on a finished ride. One rating per ride — sending again
+  /// replaces the previous one rather than failing.
+  Future<void> rateRide(
+    String rideId, {
+    required int stars,
+    String? reason,
+    CancelToken? cancelToken,
+  }) async {
+    final trimmed = reason?.trim();
+    await _send(
+      method: 'POST',
+      uri: _backendUri('/rides/$rideId/rating'),
+      body: {
+        'stars': stars,
+        if (trimmed != null && trimmed.isNotEmpty) 'reason': trimmed,
+      },
+      timeout: const Duration(seconds: 10),
+      cancelToken: cancelToken,
+    );
+  }
+
+  /// Whether this ride already carries a rating from the rider, so the prompt
+  /// is not shown again on the next visit.
+  Future<bool> hasRated(String rideId, {CancelToken? cancelToken}) async {
+    try {
+      final json = await _send(
+        method: 'GET',
+        uri: _backendUri('/rides/$rideId/rating'),
+        timeout: const Duration(seconds: 8),
+        cancelToken: cancelToken,
+      );
+      if (json is! Map) return false;
+      return json['rating'] != null;
+    } on ApiException catch (e) {
+      // A ride with no rating yet is the normal case, not a failure.
+      if (e.kind == ApiErrorKind.notFound) return false;
+      rethrow;
+    }
+  }
+
   Future<DriverOffer> driverOffers({CancelToken? cancelToken}) async {
     final json = await _send(
       method: 'GET',

@@ -477,6 +477,12 @@ class DriverPricingRequest(BaseModel):
         return self
 
 
+DEFAULT_BASE_FARE = 50.0
+DEFAULT_PRICE_PER_KM = 25.0
+DEFAULT_PRICE_PER_MINUTE = 3.0
+DEFAULT_MINIMUM_FARE = 100.0
+
+
 def _quote_fare(pricing: dict, distance_meters: float, duration_seconds: float) -> float:
     """Fare for a trip using a driver's own rate card.
 
@@ -1450,7 +1456,15 @@ def get_ride_brief(
 
     # Authorisation: the requesting user must be a driver, and must either
     # own this ride or be looking at a ride that is still open.
-    cur.execute("SELECT id FROM drivers WHERE user_id = %s", (current_user["id"],))
+    # The rate card is selected here too: it is read a few lines below to
+    # quote the fare, and fetching only the id left every rate at 0.
+    cur.execute(
+        """SELECT id, base_fare, price_per_km, price_per_minute, minimum_fare,
+                  currency
+           FROM drivers
+           WHERE user_id = %s""",
+        (current_user["id"],),
+    )
     driver_row = cur.fetchone()
     cur.close()
 
@@ -1463,13 +1477,16 @@ def get_ride_brief(
         raise HTTPException(status_code=403, detail="Ride is assigned to another driver")
 
     # Quote the trip with this driver's own rate card so the amount shown on
-    # the offer is the amount the rider is charged.
+    # the offer is the amount the rider is charged. Fall back to the platform
+    # defaults so an unconfigured driver never quotes a ride at zero.
     pricing = {
-        "base_fare": float(driver_row.get("base_fare") or 0),
-        "price_per_km": float(driver_row.get("price_per_km") or 0),
-        "price_per_minute": float(driver_row.get("price_per_minute") or 0),
-        "minimum_fare": float(driver_row.get("minimum_fare") or 0),
-        "currency": driver_row.get("currency") or "KES",
+        "base_fare": float(driver_row["base_fare"] or DEFAULT_BASE_FARE),
+        "price_per_km": float(driver_row["price_per_km"] or DEFAULT_PRICE_PER_KM),
+        "price_per_minute": float(
+            driver_row["price_per_minute"] or DEFAULT_PRICE_PER_MINUTE
+        ),
+        "minimum_fare": float(driver_row["minimum_fare"] or DEFAULT_MINIMUM_FARE),
+        "currency": driver_row["currency"] or "KES",
     }
     quoted = _quote_fare(
         pricing,
@@ -2184,3 +2201,128 @@ def advance_ride_state(
         cur.close()
 
     return _serialize_ride(_load_ride_for(db, ride_id))
+
+
+@app.get("/rides/{ride_id}/rating")
+def get_ride_rating(
+    ride_id: str,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """The rating left on a ride, or `null` when the rider has not rated yet.
+
+    Lets the app show the prompt exactly once instead of every time the rider
+    opens the app after finishing a trip.
+    """
+    ride = _load_ride_for(db, ride_id)
+    _assert_ride_party(db, ride, current_user)
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
+        """SELECT id, stars, reason, created_at
+           FROM ratings
+           WHERE ride_id = %s""",
+        (ride_id,),
+    )
+    row = cur.fetchone()
+    cur.close()
+
+    if row is None:
+        return {"ride_id": ride_id, "rating": None}
+
+    return {
+        "ride_id": ride_id,
+        "rating": {
+            "id": row["id"],
+            "stars": row["stars"],
+            "reason": row["reason"],
+            "created_at": row["created_at"].isoformat(),
+        },
+    }
+
+
+class RatingIn(BaseModel):
+    stars: int
+    reason: Optional[str] = None
+
+
+@app.post("/rides/{ride_id}/rating", status_code=status.HTTP_201_CREATED)
+def rate_ride(
+    ride_id: str,
+    req: RatingIn,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """A rider rates the driver once the trip is finished.
+
+    One rating per ride. Re-rating the same ride replaces the old score rather
+    than failing, so a rider who dismisses the prompt and gets it again can
+    change their mind. The driver's headline number is a running average of
+    every rating they have received.
+    """
+    if req.stars < 1 or req.stars > 5:
+        raise HTTPException(status_code=422, detail="Stars must be between 1 and 5")
+
+    ride = _load_ride_for(db, ride_id)
+    _assert_ride_party(db, ride, current_user)
+
+    # Ratings are the rider's to give, and only for a trip that actually ran.
+    if ride["rider_id"] != current_user["id"]:
+        raise HTTPException(
+            status_code=403, detail="Only the rider can rate this ride"
+        )
+    if ride["state"] != "completed":
+        raise HTTPException(
+            status_code=409, detail="You can only rate a completed ride"
+        )
+    if ride["driver_id"] is None:
+        raise HTTPException(
+            status_code=409, detail="This ride had no driver to rate"
+        )
+
+    reason = (req.reason or "").strip() or None
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
+        """INSERT INTO ratings
+               (id, ride_id, rider_id, driver_id, stars, reason, created_at)
+           VALUES (%s, %s, %s, %s, %s, %s, NOW() AT TIME ZONE 'UTC')
+           ON CONFLICT (ride_id) DO UPDATE
+               SET stars = EXCLUDED.stars,
+                   reason = EXCLUDED.reason,
+                   created_at = EXCLUDED.created_at
+           RETURNING id, stars, reason, created_at""",
+        (
+            str(uuid.uuid4()),
+            ride_id,
+            current_user["id"],
+            ride["driver_id"],
+            req.stars,
+            reason,
+        ),
+    )
+    saved = cur.fetchone()
+
+    # Recompute the headline from the ratings themselves rather than nudging
+    # the old value, so a changed rating can never drift it.
+    cur.execute(
+        """UPDATE drivers d
+           SET rating = COALESCE((
+                   SELECT ROUND(AVG(stars)::numeric, 2)::float
+                   FROM ratings
+                   WHERE driver_id = d.id
+               ), d.rating),
+               updated_at = NOW() AT TIME ZONE 'UTC'
+           WHERE d.id = %s""",
+        (ride["driver_id"],),
+    )
+    cur.close()
+
+    return {
+        "id": saved["id"],
+        "ride_id": ride_id,
+        "driver_id": ride["driver_id"],
+        "stars": saved["stars"],
+        "reason": saved["reason"],
+        "created_at": saved["created_at"].isoformat(),
+    }
