@@ -11,7 +11,7 @@ DB_CONFIG = {
 }
 
 # Use a fixed test user ID or find an existing rider user
-RIDER_ID = "7a334937-2345-43ad-8d99-4006a7e3fa07"  # real user from DB
+RIDER_ID = "442e8c73-c854-4420-a525-9ef7f5cfc304"  # test rider from DB
 
 SAMPLE_RIDES = [
     {
@@ -109,6 +109,9 @@ def main():
     cur = conn.cursor()
 
     now = datetime.datetime.now()
+
+    # Delete existing rides for this rider to avoid duplicates
+    cur.execute("DELETE FROM rides WHERE rider_id = %s", (RIDER_ID,))
 
     for ride in SAMPLE_RIDES:
         ride_id = str(uuid.uuid4())
