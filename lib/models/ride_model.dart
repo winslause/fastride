@@ -17,6 +17,8 @@ class RideModel {
     this.vehicleClass = VehicleClass.standard,
     this.fareEstimate,
     this.fareFinal,
+    this.fareBreakdown,
+    this.pricing = const DriverPricing(),
     this.currency = 'KES',
     this.distanceMeters,
     this.durationSeconds,
@@ -42,6 +44,12 @@ class RideModel {
   final VehicleClass vehicleClass;
   final double? fareEstimate;
   final double? fareFinal;
+
+  /// Itemised fare from the driver's rate card, as quoted by the backend.
+  final FareBreakdown? fareBreakdown;
+
+  /// The rate card this fare was quoted from.
+  final DriverPricing pricing;
   final String currency;
   final double? distanceMeters;
   final double? durationSeconds;
@@ -216,7 +224,15 @@ class RideModel {
       fareFinal: _double(json['fare_final']) ??
           _double(json['final_fare']) ??
           _double(json['total']),
-      currency: _string(json['currency']) ?? 'USD',
+      currency: _string(json['currency']) ?? 'KES',
+      fareBreakdown: _map(json['fare_breakdown']) is Map
+          ? FareBreakdown.fromJson(
+              (_map(json['fare_breakdown']) as Map).cast<String, dynamic>())
+          : null,
+      pricing: _map(json['pricing']) is Map
+          ? DriverPricing.fromJson(
+              (_map(json['pricing']) as Map).cast<String, dynamic>())
+          : const DriverPricing(),
       distanceMeters:
           _double(json['distance_meters']) ?? _double(json['distance']),
       durationSeconds:
@@ -518,6 +534,98 @@ class RideLocation {
   String toString() => 'RideLocation($lat, $lng, "$displayLabel")';
 }
 
+/// =========================================================================
+/// RideOfferBrief
+/// -------------------------------------------------------------------------
+/// The backend's view of a ride offer, including the rider's contact details.
+/// The socket `ride_offer` message only needs to carry the ride id — the
+/// driver app then fetches this so the phone number is authoritative.
+/// =========================================================================
+@immutable
+class RideOfferBrief {
+  const RideOfferBrief({
+    required this.id,
+    required this.pickup,
+    required this.dropoff,
+    this.state = 'requested',
+    this.riderName = 'Rider',
+    this.riderPhone = '',
+    this.fare = 0,
+    this.currency = 'KES',
+    this.distanceMeters = 0,
+    this.durationSeconds = 0,
+    this.otp,
+    DriverPricing? pricing,
+  }) : _pricing = pricing;
+
+  final String id;
+  final RideLocation pickup;
+  final RideLocation dropoff;
+  final String state;
+  final String riderName;
+  final String riderPhone;
+  final double fare;
+  final String currency;
+  final double distanceMeters;
+  final double durationSeconds;
+  final String? otp;
+
+  /// The driver's rate card the fare was computed from. Nullable because it
+  /// may be absent on offers raised before the driver set their pricing.
+  final DriverPricing? _pricing;
+
+  /// The rate card, guaranteed non-null.
+  DriverPricing get pricing => _pricing ?? const DriverPricing();
+
+  bool get hasPhone => riderPhone.trim().isNotEmpty;
+
+  factory RideOfferBrief.fromJson(Map<String, dynamic> json) {
+    final riderJson = json['rider'];
+    final rider = riderJson is Map ? riderJson.cast<String, dynamic>() : null;
+    final pricingJson = json['pricing'];
+
+    final distance =
+        _double(json['distance_meters']) ?? _double(json['distance']) ?? 0;
+    final duration =
+        _double(json['duration_seconds']) ?? _double(json['duration']) ?? 0;
+
+    return RideOfferBrief(
+      id: _string(json['id']) ?? _string(json['ride_id']) ?? '',
+      pickup: RideLocation.fromJson(
+        _map(json['pickup']) ?? const <String, dynamic>{},
+      ),
+      dropoff: RideLocation.fromJson(
+        _map(json['dropoff']) ?? const <String, dynamic>{},
+      ),
+      state: _string(json['state']) ?? 'requested',
+      riderName: _string(rider?['full_name']) ??
+          _string(rider?['name']) ??
+          _string(json['rider_name']) ??
+          'Rider',
+      riderPhone: _string(rider?['phone']) ??
+          _string(rider?['phone_number']) ??
+          _string(json['rider_phone']) ??
+          '',
+      // The backend already quotes this using the driver's own rate card, so
+      // prefer its figure and only fall back to local calculation.
+      fare: _double(json['quoted_fare']) ??
+          _double(json['fare']) ??
+          _double(json['payout']) ??
+          (pricingJson is Map
+              ? DriverPricing.fromJson(pricingJson.cast<String, dynamic>())
+                  .quote(distanceMeters: distance, durationSeconds: duration)
+              : 0),
+      currency: _string(json['currency']) ?? 'KES',
+      distanceMeters: distance,
+      durationSeconds: duration,
+      otp: _string(json['otp']),
+      pricing: pricingJson is Map
+          ? DriverPricing.fromJson(pricingJson.cast<String, dynamic>())
+          : null,
+    );
+  }
+}
+
 abstract final class FareCalculator {
   static const double basePrice = 50.0;
   static const double perKmRate = 25.0;
@@ -630,4 +738,173 @@ List<({double lat, double lng})>? _polyline(dynamic v) {
     }
   }
   return out.isEmpty ? null : out;
+}
+
+/// =========================================================================
+/// DriverOffer
+/// -------------------------------------------------------------------------
+/// One poll of `GET /drivers/me/offers`: the requests waiting on the driver,
+/// plus the ids the server expired on this poll.
+/// =========================================================================
+@immutable
+class DriverOffer {
+  const DriverOffer({
+    required this.offers,
+    this.expired = const [],
+  });
+
+  final List<RideOffer> offers;
+  final List<String> expired;
+
+  bool get isEmpty => offers.isEmpty;
+  bool get hasOffers => offers.isNotEmpty;
+  RideOffer? get first => offers.isEmpty ? null : offers.first;
+}
+
+/// =========================================================================
+/// RideOffer
+/// -------------------------------------------------------------------------
+/// A dispatcher-issued offer. Lightweight — no full RideModel needed
+/// until the driver accepts.
+/// =========================================================================
+class RideOffer {
+  const RideOffer({
+    required this.rideId,
+    required this.pickup,
+    required this.dropoff,
+    required this.distanceMeters,
+    required this.durationSeconds,
+    required this.payout,
+    required this.currency,
+    required this.riderName,
+    required this.riderRating,
+    this.riderPhone = '',
+    this.distanceToPickupMeters = 1200,
+    this.otp,
+    DriverPricing? pricing,
+  }) : _pricing = pricing;
+
+  final String rideId;
+  final RideLocation pickup;
+  final RideLocation dropoff;
+  final double distanceMeters;
+  final double durationSeconds;
+  final double payout;
+  final String currency;
+  final String riderName;
+  final double riderRating;
+  final String riderPhone;
+  final double distanceToPickupMeters;
+  final String? otp;
+
+  /// The driver's rate card, when known. Nullable because it arrives from the
+  /// network and may be absent on older offers.
+  final DriverPricing? _pricing;
+
+  /// The rate card, guaranteed non-null — falls back to platform defaults.
+  DriverPricing get pricing => _pricing ?? const DriverPricing();
+
+  bool get hasRiderPhone => riderPhone.trim().isNotEmpty;
+
+  /// Build an offer from `GET /drivers/me/offers`, which carries only the
+  /// summary. The driver app merges the full detail from `/rides/{id}/brief`
+  /// before showing the sheet.
+  factory RideOffer.fromJson(Map<String, dynamic> json) {
+    return RideOffer(
+      rideId: json['id']?.toString() ?? '',
+      pickup: const RideLocation(lat: 0, lng: 0, address: ''),
+      dropoff: const RideLocation(lat: 0, lng: 0, address: ''),
+      distanceMeters: (json['distance_meters'] as num?)?.toDouble() ?? 0,
+      durationSeconds: (json['duration_seconds'] as num?)?.toDouble() ?? 0,
+      payout: (json['fare'] as num?)?.toDouble() ?? 0,
+      currency: json['currency']?.toString() ?? 'KES',
+      riderName: json['rider_name']?.toString() ?? 'Rider',
+      riderRating: (json['rider_rating'] as num?)?.toDouble() ?? 5,
+      riderPhone: json['rider_phone']?.toString() ?? '',
+      otp: json['otp']?.toString(),
+      pricing: json['pricing'] is Map
+          ? DriverPricing.fromJson((json['pricing'] as Map).cast<String, dynamic>())
+          : null,
+    );
+  }
+
+  /// Fill in the parts a summary did not carry, from a full brief.
+  RideOffer withLocations({
+    required RideLocation newPickup,
+    required RideLocation newDropoff,
+  }) {
+    return RideOffer(
+      rideId: rideId,
+      pickup: newPickup,
+      dropoff: newDropoff,
+      distanceMeters: distanceMeters,
+      durationSeconds: durationSeconds,
+      payout: payout,
+      currency: currency,
+      riderName: riderName,
+      riderRating: riderRating,
+      riderPhone: riderPhone,
+      distanceToPickupMeters: distanceToPickupMeters,
+      otp: otp,
+      pricing: pricing,
+    );
+  }
+
+  /// One-line explanation of the total, e.g.
+  /// `Base 50 + 8.4 km × 30 + 12 min × 3`.
+  String get priceBreakdown {
+    if (distanceMeters <= 0) return '';
+    final km = distanceMeters / 1000.0;
+    final minutes = (durationSeconds / 60).round();
+    final parts = <String>[
+      'Base ${_money(pricing.baseFare)}',
+      if (km > 0) '${km.toStringAsFixed(1)} km × ${_money(pricing.pricePerKm)}',
+      if (minutes > 0) '$minutes min × ${_money(pricing.pricePerMinute)}',
+    ];
+    return parts.join('  ·  ');
+  }
+
+  String _money(double v) =>
+      v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
+
+  /// Fills in anything the socket message didn't carry from the backend.
+  RideOffer mergeBrief(RideOfferBrief brief) {
+    return RideOffer(
+      rideId: rideId.isEmpty ? brief.id : rideId,
+      pickup: brief.pickup.displayLabel.isEmpty ? pickup : brief.pickup,
+      dropoff: brief.dropoff.displayLabel.isEmpty ? dropoff : brief.dropoff,
+      distanceMeters:
+          brief.distanceMeters > 0 ? brief.distanceMeters : distanceMeters,
+      durationSeconds:
+          brief.durationSeconds > 0 ? brief.durationSeconds : durationSeconds,
+      payout: brief.fare > 0 ? brief.fare : payout,
+      currency: brief.currency.isEmpty ? currency : brief.currency,
+      riderName: riderName == 'Rider' ? brief.riderName : riderName,
+      riderRating: riderRating,
+      riderPhone: brief.riderPhone.isEmpty ? riderPhone : brief.riderPhone,
+      distanceToPickupMeters: distanceToPickupMeters,
+      otp: brief.otp ?? otp,
+      pricing: brief.pricing,
+    );
+  }
+
+  String get tripDistanceLabel {
+    if (distanceMeters < 1000) return '${distanceMeters.round()} m';
+    return '${(distanceMeters / 1000).toStringAsFixed(1)} km';
+  }
+
+  String get distanceToPickupLabel {
+    if (distanceToPickupMeters < 1000) {
+      return '${distanceToPickupMeters.round()} m';
+    }
+    return '${(distanceToPickupMeters / 1000).toStringAsFixed(1)} km';
+  }
+
+  String get tripDurationLabel {
+    final m = (durationSeconds / 60).round();
+    if (m < 60) return '$m min';
+    final h = m ~/ 60;
+    final r = m % 60;
+    return '${h}h ${r.toString().padLeft(2, '0')}m';
+  }
 }

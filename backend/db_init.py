@@ -19,7 +19,7 @@ def main():
             id VARCHAR(36) PRIMARY KEY,
             full_name VARCHAR(255) NOT NULL,
             phone VARCHAR(50) NOT NULL,
-            email VARCHAR(255) UNIQUE NOT NULL,
+            email VARCHAR(255) UNIQUE,
             password_hash VARCHAR(255) NOT NULL,
             role VARCHAR(20) NOT NULL DEFAULT 'rider',
             is_verified BOOLEAN DEFAULT FALSE,
@@ -27,6 +27,8 @@ def main():
             updated_at TIMESTAMP NOT NULL
         )
     """)
+    cur.execute("ALTER TABLE users ALTER COLUMN email DROP NOT NULL")
+    cur.execute("UPDATE users SET email = NULL WHERE email = ''")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS drivers (
@@ -48,6 +50,15 @@ def main():
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS longitude FLOAT")
     cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP")
 
+    # --- Driver-set pricing -------------------------------------------------
+    # Each driver controls their own rate card. Fares shown to riders and to
+    # the driver on an offer are computed from these.
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS base_fare FLOAT DEFAULT 50")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS price_per_km FLOAT DEFAULT 25")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS price_per_minute FLOAT DEFAULT 3")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS minimum_fare FLOAT DEFAULT 100")
+    cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS currency VARCHAR(10) DEFAULT 'KES'")
+
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_drivers_location
         ON drivers(latitude, longitude)
@@ -67,6 +78,32 @@ def main():
             photo_url TEXT
         )
     """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS driver_services (
+            id VARCHAR(36) PRIMARY KEY,
+            driver_id VARCHAR(36) NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
+            name VARCHAR(120) NOT NULL,
+            description TEXT,
+            price FLOAT,
+            currency VARCHAR(10) DEFAULT 'KES',
+            duration_minutes INTEGER,
+            icon VARCHAR(60),
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_driver_services_driver
+        ON driver_services(driver_id, created_at DESC)
+    """)
+
+    cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE")
+    cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS is_default BOOLEAN DEFAULT FALSE")
+    cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS created_at TIMESTAMP")
+    cur.execute("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS places (

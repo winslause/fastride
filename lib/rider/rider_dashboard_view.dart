@@ -12,6 +12,7 @@ import '../core/api_client.dart';
 import '../core/location_service.dart';
 import '../core/websocket_client.dart';
 import '../models/ride_model.dart';
+import '../shared/map_zoom_controls.dart';
 import '../theme.dart';
 import 'active_trip_sheet.dart';
 import 'destination_sheet.dart';
@@ -66,6 +67,9 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   RideLocation? _dropoffLocation;
   OsrmRoute? _route;
   RideModel? _ride;
+
+  /// An unfinished ride this account is still part of, recovered on sign-in.
+  RideModel? _resumableRide;
   StreamSubscription<WsEvent>? _wsSub;
   StreamSubscription<Position>? _posSub;
   CancelToken? _routeCancel;
@@ -104,6 +108,8 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
     if (token != null) {
       _api.authToken = token;
     }
+    // Only safe to call the API once the token is attached.
+    await _resumeActiveRide();
   }
 
   @override
@@ -330,11 +336,15 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   }
 
   Future<void> _openFareSheet(OsrmRoute route) async {
+    if (_pickupLocation == null || _dropoffLocation == null) return;
     setState(() => _state = RiderState.pricing);
 
     final selection = await FareSelectSheet.show(
       context: context,
+      api: _api,
       route: route,
+      pickup: _pickupLocation!,
+      dropoff: _dropoffLocation!,
       pickupLabel: _pickupLocation?.displayLabel ?? 'Pickup',
       dropoffLabel: _dropoffLocation?.displayLabel ?? 'Destination',
     );
@@ -352,6 +362,69 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
     await _openMatchingSheet(selection);
   }
 
+  /// ------------------------------------------------------------------------
+  /// Resuming an unfinished ride
+  /// ------------------------------------------------------------------------
+  /// Signing out mid-trip only clears the local session, so the ride row is
+  /// still on the server. This finds it again on the next sign-in.
+  Future<void> _resumeActiveRide() async {
+    if (!mounted) return;
+
+    try {
+      final ride = await _api.activeRide();
+      if (!mounted || ride == null) return;
+      setState(() => _resumableRide = ride);
+    } catch (_) {
+      // Nothing in progress, or the network is unavailable.
+    }
+  }
+
+  /// Put the rider back on the map for [ride] and open the live trip sheet.
+  Future<void> _openRide(RideModel ride) async {
+    if (!mounted) return;
+
+    setState(() {
+      _ride = ride;
+      _resumableRide = null;
+      _state = RiderState.trip;
+      _pickupLocation = ride.pickup;
+      _dropoffLocation = ride.dropoff;
+    });
+
+    await _loadRouteFor(ride.pickup, ride.dropoff);
+    if (!mounted) return;
+    await _openActiveTripSheet(ride);
+  }
+
+  /// Draw the route for a resumed trip without reopening the fare or driver
+  /// picker — the ride is already booked.
+  Future<void> _loadRouteFor(RideLocation from, RideLocation to) async {
+    setState(() => _routeLoading = true);
+    final a = LatLng(from.lat, from.lng);
+    final b = LatLng(to.lat, to.lng);
+
+    try {
+      final route = await _api.route(
+        fromLat: a.latitude,
+        fromLng: a.longitude,
+        toLat: b.latitude,
+        toLng: b.longitude,
+      );
+      if (!mounted) return;
+      setState(() {
+        _route = route;
+        _routeLoading = false;
+        _pickup = a;
+        _dropoff = b;
+      });
+      _fitBounds(a, b);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _routeLoading = false);
+      _fitBounds(a, b);
+    }
+  }
+
   Future<void> _openMatchingSheet(FareSelection selection) async {
     setState(() => _state = RiderState.matching);
 
@@ -364,6 +437,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       fare: selection.fare,
       distanceMeters: _route?.distanceMeters ?? 0,
       durationSeconds: _route?.durationSeconds ?? 0,
+      preselectedDriver: selection.driver,
     );
 
     if (!mounted) return;
@@ -415,6 +489,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
           _dropoff = null;
           _dropoffLocation = null;
           _ride = null;
+          _resumableRide = null;
         });
       case null:
         // Sheet dismissed without a terminal outcome — leave state as-is.
@@ -461,6 +536,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
         body: Stack(
           children: [
             _buildMap(),
+            _buildZoomControls(),
             _buildTopBar(),
             _buildBottomArea(),
             if (_routeLoading) _buildRouteLoadingOverlay(),
@@ -514,14 +590,27 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
     );
   }
 
+  /// Pinch, double tap and scroll wheel already work on the map; these
+  /// buttons make zooming discoverable for everyone else.
+  Widget _buildZoomControls() {
+    return Positioned(
+      right: AppTheme.spaceLg,
+      top: 96,
+      child: SafeArea(
+        bottom: false,
+        child: MapZoomControls(controller: _mapController),
+      ),
+    );
+  }
+
   Widget _buildMap() {
     return FlutterMap(
       mapController: _mapController,
       options: MapOptions(
         initialCenter: _center,
         initialZoom: 15,
-        minZoom: 3,
-        maxZoom: 19,
+        minZoom: AppConstants.mapMinZoom,
+        maxZoom: AppConstants.mapMaxZoom,
         onMapReady: () {
           _mapReady = true;
           _safeMove(_center, zoom: 15);
@@ -540,7 +629,9 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
         TileLayer(
           urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
           userAgentPackageName: 'com.ride.app',
-          maxNativeZoom: 19,
+          maxNativeZoom: AppConstants.mapNativeMaxZoom,
+          minZoom: AppConstants.mapMinZoom,
+          maxZoom: AppConstants.mapMaxZoom,
           tileProvider: NetworkTileProvider(),
         ),
         if (_route != null && _route!.polyline.isNotEmpty)
@@ -684,6 +775,10 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
         _ride?.state.label ?? 'Matching you…',
         AppTheme.warning,
       ),
+      RiderState.trip => (
+        _ride?.state.label ?? 'On the trip',
+        AppTheme.success,
+      ),
     };
 
     return Align(
@@ -742,6 +837,98 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
     );
   }
 
+  /// Shown when this account still has a trip in progress — for example after
+  /// signing out mid-ride. Tapping it puts the rider back on the map.
+  Widget _resumeTripCard() {
+    final ride = _resumableRide;
+    if (ride == null) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppTheme.spaceLg,
+        AppTheme.spaceLg,
+        AppTheme.spaceLg,
+        0,
+      ),
+      child: Material(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+          onTap: () {
+            HapticFeedback.mediumImpact();
+            _openRide(ride);
+          },
+          child: Container(
+            padding: const EdgeInsets.all(AppTheme.spaceLg),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+              border: Border.all(
+                color: AppTheme.success.withValues(alpha: 0.55),
+                width: 1.4,
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: AppTheme.success.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(AppTheme.radiusMd),
+                  ),
+                  child: const Icon(
+                    Icons.play_circle_fill_rounded,
+                    color: AppTheme.success,
+                  ),
+                ),
+                const SizedBox(width: AppTheme.spaceMd),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'You have a trip in progress',
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '${ride.pickup.displayLabel} → '
+                        '${ride.dropoff.displayLabel}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                      Text(
+                        ride.state.label,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: AppTheme.success,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(
+                  Icons.chevron_right_rounded,
+                  color: AppTheme.success,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _bottomNavigator() {
     final scheme = Theme.of(context).colorScheme;
 
@@ -764,6 +951,9 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // A trip left in progress by signing out — tap to go back to it.
+            if (_resumableRide != null)
+              _resumeTripCard(),
             // Primary CTA — opens the destination sheet.
             Padding(
               padding: const EdgeInsets.fromLTRB(
@@ -856,4 +1046,4 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   }
 }
 
-enum RiderState { draft, searching, pricing, matching }
+enum RiderState { draft, searching, pricing, matching, trip }

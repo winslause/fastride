@@ -12,6 +12,7 @@ import '../core/auth_service.dart';
 import '../core/location_service.dart';
 import '../core/websocket_client.dart';
 import '../models/ride_model.dart';
+import '../shared/map_zoom_controls.dart';
 import '../theme.dart';
 import 'active_trip_sheet.dart';
 import 'destination_sheet.dart';
@@ -71,6 +72,10 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   RideLocation? _dropoffLocation;
   OsrmRoute? _route;
   RideModel? _ride;
+
+  /// An unfinished ride this account is still part of, recovered on sign-in so
+  /// a trip interrupted by signing out is not lost.
+  RideModel? _resumableRide;
 
   // --- Streams --------------------------------------------------------------
   StreamSubscription<Position>? _posSub;
@@ -173,6 +178,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
     }
 
     await _loadRecents();
+    await _resumeActiveRide();
 
     _posSub = _location.positionStream().listen((pos) {
       if (!mounted) return;
@@ -358,6 +364,37 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
     await _fetchRouteAndPrice();
   }
 
+  /// Draw the route for a ride we are resuming, without reopening the fare or
+  /// driver picker — the trip is already booked.
+  Future<void> _loadRouteFor(RideLocation from, RideLocation to) async {
+    setState(() => _loadingRoute = true);
+    final a = LatLng(from.lat, from.lng);
+    final b = LatLng(to.lat, to.lng);
+
+    try {
+      final route = await _api.route(
+        fromLat: a.latitude,
+        fromLng: a.longitude,
+        toLat: b.latitude,
+        toLng: b.longitude,
+      );
+      if (!mounted) return;
+      setState(() {
+        _route = route;
+        _loadingRoute = false;
+        _pickup = a;
+        _dropoff = b;
+        _followingUser = false;
+      });
+      _fitBounds(a, b);
+    } catch (_) {
+      if (!mounted) return;
+      // The trip still opens even if the line could not be drawn.
+      setState(() => _loadingRoute = false);
+      _fitBounds(a, b);
+    }
+  }
+
   Future<void> _fetchRouteAndPrice() async {
     if (_pickup == null || _dropoff == null) return;
     if (!mounted) return;
@@ -400,12 +437,16 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   }
 
   Future<void> _openFareSheet(OsrmRoute route) async {
+    if (_pickupLocation == null || _dropoffLocation == null) return;
     if (!mounted) return;
     setState(() => _state = RiderState.pricing);
 
     final selection = await FareSelectSheet.show(
       context: context,
+      api: _api,
       route: route,
+      pickup: _pickupLocation!,
+      dropoff: _dropoffLocation!,
       pickupLabel: _pickupLocation?.displayLabel ?? 'Pickup',
       dropoffLabel: _dropoffLocation?.displayLabel ?? 'Destination',
     );
@@ -416,6 +457,50 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       return;
     }
     await _openMatchingSheet(selection);
+  }
+
+  /// ------------------------------------------------------------------------
+  /// Resuming an unfinished ride
+  /// ------------------------------------------------------------------------
+  /// Signing out mid-trip only clears the local session — the ride row stays
+  /// on the server. On the next sign-in this puts the rider straight back on
+  /// the map, and the "Resume trip" card lets them jump back in on demand.
+  Future<void> _resumeActiveRide() async {
+    if (!mounted) return;
+    if (!_auth.isAuthenticated) return;
+
+    try {
+      final ride = await _api.activeRide();
+      if (!mounted) return;
+      if (ride == null) return;
+      if (ride.riderId.isNotEmpty &&
+          _auth.user?.id != null &&
+          ride.riderId != _auth.user!.id) {
+        return;
+      }
+      setState(() => _resumableRide = ride);
+    } catch (_) {
+      // No ride, or the network is down. The home screen is unaffected.
+    }
+  }
+
+  /// Take the rider back onto the map for [ride]: draw the route, frame it, and
+  /// open the live trip sheet.
+  Future<void> _openRide(RideModel ride) async {
+    if (!mounted) return;
+
+    setState(() {
+      _ride = ride;
+      _resumableRide = null;
+      _state = RiderState.trip;
+      _pickupLocation = ride.pickup;
+      _dropoffLocation = ride.dropoff;
+      _followingUser = false;
+    });
+
+    await _loadRouteFor(ride.pickup, ride.dropoff);
+    if (!mounted) return;
+    await _openActiveTripSheet(ride);
   }
 
   Future<void> _openMatchingSheet(FareSelection selection) async {
@@ -432,6 +517,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       fare: selection.fare,
       distanceMeters: _route?.distanceMeters ?? 0,
       durationSeconds: _route?.durationSeconds ?? 0,
+      preselectedDriver: selection.driver,
     );
 
     if (!mounted) return;
@@ -478,6 +564,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       _dropoff = null;
       _dropoffLocation = null;
       _ride = null;
+      _resumableRide = null;
       _followingUser = true;
     });
     if (_pickup != null) _safeMove(_pickup!, zoom: 15);
@@ -1225,8 +1312,8 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       options: MapOptions(
         initialCenter: _center,
         initialZoom: 15,
-        minZoom: 3,
-        maxZoom: 19,
+        minZoom: AppConstants.mapMinZoom,
+        maxZoom: AppConstants.mapMaxZoom,
         onMapReady: () {
           _mapReady = true;
           _safeMove(_center, zoom: 15);
@@ -1250,7 +1337,9 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
           urlTemplate: tileUrl,
           subdomains: const ['a', 'b', 'c', 'd'],
           userAgentPackageName: 'com.fastride.app',
-          maxNativeZoom: 19,
+          minZoom: AppConstants.mapMinZoom,
+          maxZoom: AppConstants.mapMaxZoom,
+          maxNativeZoom: AppConstants.mapNativeMaxZoom,
         ),
         if (_route != null && _route!.polyline.isNotEmpty)
           PolylineLayer(
@@ -1530,6 +1619,8 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       bottom: isWide ? 240 : 300,
       child: Column(
         children: [
+          MapZoomControls(controller: _mapController),
+          const SizedBox(height: AppTheme.spaceSm),
           _mapControlButton(
             icon: _followingUser
                 ? Icons.my_location_rounded
@@ -1585,11 +1676,100 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
          children: [
+           _resumeTripCard(),
            _recentStrip(),
          ],
        ),
      );
    }
+
+  /// Shown when this account still has a trip in progress — for example after
+  /// signing out mid-ride. Tapping it puts the rider back on the map.
+  Widget _resumeTripCard() {
+    final ride = _resumableRide;
+    if (ride == null) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppTheme.spaceMd),
+      child: Material(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+        elevation: 6,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+          onTap: () {
+            HapticFeedback.mediumImpact();
+            _openRide(ride);
+          },
+          child: Container(
+            padding: const EdgeInsets.all(AppTheme.spaceLg),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+              border: Border.all(
+                color: AppTheme.success.withValues(alpha: 0.55),
+                width: 1.4,
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: AppTheme.success.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(AppTheme.radiusMd),
+                  ),
+                  child: const Icon(
+                    Icons.play_circle_fill_rounded,
+                    color: AppTheme.success,
+                  ),
+                ),
+                const SizedBox(width: AppTheme.spaceMd),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'You have a trip in progress',
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '${ride.pickup.displayLabel} → '
+                        '${ride.dropoff.displayLabel}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                      Text(
+                        ride.state.label,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: AppTheme.success,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(
+                  Icons.chevron_right_rounded,
+                  color: AppTheme.success,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _recentStrip() {
     final theme = Theme.of(context);

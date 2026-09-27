@@ -2,8 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/ride_model.dart';
+import '../shared/map_zoom_controls.dart';
 import '../theme.dart';
 
 /// =========================================================================
@@ -14,6 +18,8 @@ import '../theme.dart';
 /// Behaviour:
 ///   • Full-screen takeover — ignores back gesture, no drag-to-dismiss.
 ///   • 15-second radial countdown (spec) → auto-declines at 0.
+///   • Shows the rider's route on a map: pickup and destination both red.
+///   • Shows the rider's phone number with one-tap call.
 ///   • Returns `true` on Accept, `false` on Reject / timeout.
 /// =========================================================================
 class IncomingRequestSheet extends StatefulWidget {
@@ -45,6 +51,7 @@ class IncomingRequestSheet extends StatefulWidget {
 class _IncomingRequestSheetState extends State<IncomingRequestSheet>
     with SingleTickerProviderStateMixin {
   late final AnimationController _countdown;
+  final MapController _mapController = MapController();
   bool _answered = false;
 
   @override
@@ -100,17 +107,28 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
             padding: const EdgeInsets.all(AppTheme.spaceLg),
             child: Column(
               children: [
-                // --- Countdown header ------------------------------------
+                // --- Countdown header (pinned) ----------------------------
                 _countdownHeader(theme, scheme),
 
-                const Spacer(),
+                const SizedBox(height: AppTheme.spaceMd),
 
-                // --- Offer card ------------------------------------------
-                _offerCard(theme, scheme),
+                // --- Route + offer card (scrolls on short screens) -------
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _routePreview(theme, scheme),
+                        const SizedBox(height: AppTheme.spaceLg),
+                        _offerCard(theme, scheme),
+                      ],
+                    ),
+                  ),
+                ),
 
-                const Spacer(),
+                const SizedBox(height: AppTheme.spaceLg),
 
-                // --- Actions ---------------------------------------------
+                // --- Actions (pinned) ------------------------------------
                 _actions(theme, scheme),
               ],
             ),
@@ -121,6 +139,11 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
   }
 
   Widget _countdownHeader(ThemeData theme, ColorScheme scheme) {
+    // Short viewports (small browser windows, landscape phones) get a
+    // compact header so the offer card still has room.
+    final compact = MediaQuery.sizeOf(context).height < 680;
+    final dialSize = compact ? 60.0 : 96.0;
+
     return AnimatedBuilder(
       animation: _countdown,
       builder: (_, __) {
@@ -132,14 +155,14 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
         return Column(
           children: [
             SizedBox(
-              width: 96,
-              height: 96,
+              width: dialSize,
+              height: dialSize,
               child: Stack(
                 alignment: Alignment.center,
                 children: [
                   SizedBox(
-                    width: 96,
-                    height: 96,
+                    width: dialSize,
+                    height: dialSize,
                     child: CircularProgressIndicator(
                       value: 1 - _countdown.value,
                       strokeWidth: 5,
@@ -153,7 +176,10 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
                   ),
                   Text(
                     '$remaining',
-                    style: theme.textTheme.displaySmall?.copyWith(
+                    style: (compact
+                            ? theme.textTheme.headlineMedium
+                            : theme.textTheme.displaySmall)
+                        ?.copyWith(
                       color: Colors.white,
                       fontWeight: FontWeight.w800,
                       fontFeatures: const [FontFeature.tabularFigures()],
@@ -162,40 +188,248 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
                 ],
               ),
             ),
-            const SizedBox(height: AppTheme.spaceMd),
+            SizedBox(height: compact ? AppTheme.spaceSm : AppTheme.spaceMd),
             Text(
               'New ride request',
-              style: theme.textTheme.titleLarge?.copyWith(
+              style: (compact
+                      ? theme.textTheme.titleMedium
+                      : theme.textTheme.titleLarge)
+                  ?.copyWith(
                 color: Colors.white,
                 fontWeight: FontWeight.w700,
               ),
             ),
-            const SizedBox(height: 4),
-            Text(
-              'Accept before the timer runs out',
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: Colors.white.withValues(alpha: 0.75),
+            if (!compact) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Accept before the timer runs out',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: Colors.white.withValues(alpha: 0.75),
+                ),
               ),
-            ),
+            ],
           ],
         );
       },
     );
   }
 
+  /// Static preview of the customer's route.
+  ///
+  /// Both the pickup point (where the customer is standing) and the
+  /// destination are drawn in red, joined by a straight route line.
+  Widget _routePreview(ThemeData theme, ColorScheme scheme) {
+    final pickup = LatLng(widget.offer.pickup.lat, widget.offer.pickup.lng);
+    final dropoff = LatLng(widget.offer.dropoff.lat, widget.offer.dropoff.lng);
+    final screenHeight = MediaQuery.sizeOf(context).height;
+    final mapHeight = screenHeight < 680
+        ? 130.0
+        : screenHeight < 820
+            ? 170.0
+            : 190.0;
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(AppTheme.radiusLg),
+      child: SizedBox(
+        height: mapHeight,
+        child: Stack(
+          children: [
+            FlutterMap(
+              mapController: _mapController,
+              options: MapOptions(
+                initialCenter: LatLng(
+                  (pickup.latitude + dropoff.latitude) / 2,
+                  (pickup.longitude + dropoff.longitude) / 2,
+                ),
+                initialZoom: 13,
+                minZoom: AppConstants.mapMinZoom,
+                maxZoom: AppConstants.mapMaxZoom,
+                interactionOptions: const InteractionOptions(
+                  flags: InteractiveFlag.drag |
+                      InteractiveFlag.pinchZoom |
+                      InteractiveFlag.doubleTapZoom |
+                      InteractiveFlag.flingAnimation |
+                      InteractiveFlag.pinchMove,
+                ),
+              ),
+              children: [
+                TileLayer(
+                  urlTemplate:
+                      'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                  userAgentPackageName: 'com.fastride.app',
+                  minZoom: AppConstants.mapMinZoom,
+                  maxZoom: AppConstants.mapMaxZoom,
+                  maxNativeZoom: AppConstants.mapNativeMaxZoom,
+                ),
+                PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: [pickup, dropoff],
+                      strokeWidth: 4,
+                      color: AppTheme.danger,
+                      borderStrokeWidth: 2,
+                      borderColor: Colors.white,
+                    ),
+                  ],
+                ),
+                MarkerLayer(
+                  markers: [
+                    _redPin(pickup, Icons.person_pin_circle_rounded),
+                    _redPin(dropoff, Icons.place_rounded),
+                  ],
+                ),
+              ],
+            ),
+            Positioned(
+              right: AppTheme.spaceSm,
+              bottom: AppTheme.spaceSm,
+              child: MapZoomControls(
+                controller: _mapController,
+                compact: true,
+              ),
+            ),
+            // Legend so the two red markers are unambiguous.
+            Positioned(
+              left: AppTheme.spaceSm,
+              bottom: AppTheme.spaceSm,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.65),
+                  borderRadius: BorderRadius.circular(AppTheme.radiusPill),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.circle,
+                      size: 10,
+                      color: AppTheme.danger,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Pickup & destination',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Marker _redPin(LatLng point, IconData icon) {
+    return Marker(
+      point: point,
+      width: 44,
+      height: 44,
+      alignment: Alignment.center,
+      child: Container(
+        decoration: BoxDecoration(
+          color: AppTheme.danger,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 3),
+          boxShadow: AppTheme.softShadow,
+        ),
+        child: Icon(icon, size: 22, color: Colors.white),
+      ),
+    );
+  }
+
+  /// The customer's phone number, with a one-tap call button.
+  Widget _riderContact(ThemeData theme, ColorScheme scheme) {
+    final o = widget.offer;
+    if (!o.hasRiderPhone) return const SizedBox.shrink();
+
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppTheme.spaceMd,
+        vertical: AppTheme.spaceSm,
+      ),
+      decoration: BoxDecoration(
+        color: scheme.primary.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(AppTheme.radiusMd),
+        border: Border.all(color: scheme.primary.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.person_rounded, size: 20, color: scheme.primary),
+          const SizedBox(width: AppTheme.spaceMd),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  o.riderName,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  o.riderPhone,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Call customer',
+            onPressed: () => _callRider(o.riderPhone),
+            icon: Icon(Icons.call_rounded, color: scheme.primary),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _callRider(String phone) async {
+    final digits = phone.replaceAll(RegExp(r'[^0-9+]'), '');
+    final uri = Uri(scheme: 'tel', path: digits);
+    try {
+      final launched = await launchUrl(uri);
+      if (!launched && mounted) {
+        _showSnack('Could not start the dialler on this device.');
+      }
+    } catch (_) {
+      if (mounted) _showSnack('Could not start the dialler on this device.');
+    }
+  }
+
+  void _showSnack(String message) {
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
   Widget _offerCard(ThemeData theme, ColorScheme scheme) {
     final o = widget.offer;
     return Container(
-      padding: const EdgeInsets.all(AppTheme.spaceXl),
       decoration: BoxDecoration(
         color: scheme.surface,
         borderRadius: BorderRadius.circular(AppTheme.radiusLg),
         boxShadow: AppTheme.softShadow,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // Payout header
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(AppTheme.spaceXl),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+          // Payout header — the fare the rider is charged, derived from the
+          // driver's own per-km rate.
           Row(
             children: [
               Expanded(
@@ -203,7 +437,7 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Trip payout',
+                      'Total the rider pays',
                       style: theme.textTheme.labelMedium?.copyWith(
                         color: scheme.onSurfaceVariant,
                         letterSpacing: 0.5,
@@ -216,6 +450,15 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
                         color: AppTheme.success,
                       ),
                     ),
+                    if (o.priceBreakdown.isNotEmpty)
+                      Text(
+                        o.priceBreakdown,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                   ],
                 ),
               ),
@@ -251,13 +494,13 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
           Divider(color: scheme.outlineVariant.withValues(alpha: 0.5)),
           const SizedBox(height: AppTheme.spaceLg),
 
-          // Pickup / dropoff
+          // Pickup / dropoff — both red, matching the map above.
           _endpoint(
             theme,
             scheme,
-            icon: Icons.my_location_rounded,
-            color: scheme.primary,
-            label: 'Pickup',
+            icon: Icons.person_pin_circle_rounded,
+            color: AppTheme.danger,
+            label: 'Customer is here',
             place: o.pickup,
             distance: o.distanceToPickupLabel,
           ),
@@ -274,7 +517,7 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
             scheme,
             icon: Icons.place_rounded,
             color: AppTheme.danger,
-            label: 'Dropoff',
+            label: 'Destination',
             place: o.dropoff,
             distance: o.tripDistanceLabel,
           ),
@@ -282,6 +525,10 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
           const SizedBox(height: AppTheme.spaceLg),
           Divider(color: scheme.outlineVariant.withValues(alpha: 0.5)),
           const SizedBox(height: AppTheme.spaceMd),
+
+          // Customer contact
+          _riderContact(theme, scheme),
+          if (o.hasRiderPhone) const SizedBox(height: AppTheme.spaceMd),
 
           // Meta row
           Row(
@@ -315,7 +562,9 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
               ),
             ],
           ),
-        ],
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -471,54 +720,4 @@ class _IncomingRequestSheetState extends State<IncomingRequestSheet>
   }
 }
 
-/// =========================================================================
-/// RideOffer
-/// -------------------------------------------------------------------------
-/// A dispatcher-issued offer. Lightweight — no full RideModel needed
-/// until the driver accepts.
-/// =========================================================================
-class RideOffer {
-  const RideOffer({
-    required this.rideId,
-    required this.pickup,
-    required this.dropoff,
-    required this.distanceMeters,
-    required this.durationSeconds,
-    required this.payout,
-    required this.currency,
-    required this.riderName,
-    required this.riderRating,
-    this.distanceToPickupMeters = 1200,
-  });
 
-  final String rideId;
-  final RideLocation pickup;
-  final RideLocation dropoff;
-  final double distanceMeters;
-  final double durationSeconds;
-  final double payout;
-  final String currency;
-  final String riderName;
-  final double riderRating;
-  final double distanceToPickupMeters;
-
-  String get tripDistanceLabel {
-    if (distanceMeters < 1000) return '${distanceMeters.round()} m';
-    return '${(distanceMeters / 1000).toStringAsFixed(1)} km';
-  }
-
-  String get distanceToPickupLabel {
-    if (distanceToPickupMeters < 1000) {
-      return '${distanceToPickupMeters.round()} m';
-    }
-    return '${(distanceToPickupMeters / 1000).toStringAsFixed(1)} km';
-  }
-
-  String get tripDurationLabel {
-    final m = (durationSeconds / 60).round();
-    if (m < 60) return '$m min';
-    final h = m ~/ 60;
-    final r = m % 60;
-    return '${h}h ${r.toString().padLeft(2, '0')}m';
-  }
-}

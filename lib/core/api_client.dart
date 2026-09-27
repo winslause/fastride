@@ -331,6 +331,212 @@ class ApiClient {
     return result;
   }
 
+  // =========================================================================
+  // Ride dispatch
+  // -------------------------------------------------------------------------
+  // A rider picks an online driver, the ride is created against them with a
+  // fare quoted from their rate card, and the driver picks it up by polling
+  // `driverOffers`.
+  // =========================================================================
+
+  /// Create a ride request assigned to [driverId].
+  Future<RideModel> createRideRequest({
+    required String driverId,
+    required RideLocation pickup,
+    required RideLocation dropoff,
+    required double distanceMeters,
+    required double durationSeconds,
+    VehicleClass vehicleClass = VehicleClass.standard,
+    String currency = 'KES',
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'POST',
+      uri: _backendUri('/rides'),
+      body: {
+        'driver_id': driverId,
+        'vehicle_class': vehicleClass.wire,
+        'distance_meters': distanceMeters,
+        'duration_seconds': durationSeconds,
+        'currency': currency,
+        'pickup': {
+          'lat': pickup.lat,
+          'lng': pickup.lng,
+          'place_name': pickup.displayLabel,
+          'address': pickup.displaySubtitle,
+        },
+        'dropoff': {
+          'lat': dropoff.lat,
+          'lng': dropoff.lng,
+          'place_name': dropoff.displayLabel,
+          'address': dropoff.displaySubtitle,
+        },
+      },
+      timeout: const Duration(seconds: 12),
+      cancelToken: cancelToken,
+    );
+
+    if (json is! Map) {
+      throw const ApiException(
+        kind: ApiErrorKind.server,
+        message: 'The server did not return a ride',
+      );
+    }
+    return RideModel.fromJson(json.cast<String, dynamic>());
+  }
+
+  /// Live status of a ride. The rider polls this until the driver responds.
+  Future<RideModel> getRide(String rideId, {CancelToken? cancelToken}) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/rides/$rideId'),
+      timeout: const Duration(seconds: 10),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) {
+      throw const ApiException(
+        kind: ApiErrorKind.server,
+        message: 'The server did not return a ride',
+      );
+    }
+    return RideModel.fromJson(json.cast<String, dynamic>());
+  }
+
+  /// The caller's unfinished ride, for either role. Used to put someone back
+  /// on the map after signing out mid-trip. Null when nothing is in progress.
+  Future<RideModel?> activeRide({CancelToken? cancelToken}) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/rides/active'),
+      timeout: const Duration(seconds: 10),
+      cancelToken: cancelToken,
+    );
+
+    if (json is! Map) return null;
+    final rideJson = json['ride'];
+    if (rideJson is! Map) return null;
+
+    return RideModel.fromJson(rideJson.cast<String, dynamic>());
+  }
+
+  /// Where the rider is right now, so the driver can watch their pin move
+  /// while driving to the pickup. `live` is null until a fresh fix lands.
+  Future<RiderLocation> getRiderLocation(
+    String rideId, {
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/rides/$rideId/rider-location'),
+      timeout: const Duration(seconds: 6),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) {
+      throw const ApiException(
+        kind: ApiErrorKind.server,
+        message: 'Could not read the rider position',
+      );
+    }
+    return RiderLocation.fromJson(json.cast<String, dynamic>());
+  }
+
+  /// Accept an offer assigned to the signed-in driver.
+  Future<RideModel> acceptRide(String rideId, {CancelToken? cancelToken}) async {
+    final json = await _send(
+      method: 'POST',
+      uri: _backendUri('/rides/$rideId/accept'),
+      timeout: const Duration(seconds: 10),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) {
+      throw const ApiException(
+        kind: ApiErrorKind.server,
+        message: 'The server did not return a ride',
+      );
+    }
+    return RideModel.fromJson(json.cast<String, dynamic>());
+  }
+
+  /// Turn down an offer assigned to the signed-in driver.
+  Future<RideModel> declineRide(
+    String rideId, {
+    String reason = 'Driver declined the request',
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'POST',
+      uri: _backendUri('/rides/$rideId/decline'),
+      body: {'reason': reason},
+      timeout: const Duration(seconds: 10),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) {
+      throw const ApiException(
+        kind: ApiErrorKind.server,
+        message: 'The server did not return a ride',
+      );
+    }
+    return RideModel.fromJson(json.cast<String, dynamic>());
+  }
+
+  /// Advance a ride: `driver_arriving`, `driver_arrived`, `ongoing`,
+  /// `completed` or `cancelled`.
+  Future<RideModel> updateRideState(
+    String rideId, {
+    required RideState state,
+    String? reason,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'POST',
+      uri: _backendUri('/rides/$rideId/state'),
+      body: {
+        'state': state.wire,
+        if (reason != null) 'reason': reason,
+      },
+      timeout: const Duration(seconds: 10),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) {
+      throw const ApiException(
+        kind: ApiErrorKind.server,
+        message: 'The server did not return a ride',
+      );
+    }
+    return RideModel.fromJson(json.cast<String, dynamic>());
+  }
+
+  /// Ride requests currently waiting on the signed-in driver.
+  Future<DriverOffer> driverOffers({CancelToken? cancelToken}) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/drivers/me/offers'),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+
+    if (json is! Map) {
+      return const DriverOffer(offers: []);
+    }
+
+    final list = json['offers'];
+    final offers = <RideOffer>[];
+    if (list is List) {
+      for (final item in list) {
+        if (item is! Map) continue;
+        offers.add(RideOffer.fromJson(item.cast<String, dynamic>()));
+      }
+    }
+
+    final expiredList = json['expired'];
+    return DriverOffer(
+      offers: offers,
+      expired: expiredList is List
+          ? expiredList.map((e) => e.toString()).toList(growable: false)
+          : const [],
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Geocoding
   // -------------------------------------------------------------------------
@@ -404,21 +610,276 @@ class ApiClient {
     );
   }
 
+  // -------------------------------------------------------------------------
+  // Driver self-service
+  // -------------------------------------------------------------------------
+
+  /// Persists the driver's online/offline state (and their live position) on
+  /// the backend. Without this the driver never shows up in `GET /drivers`,
+  /// which is what riders use to find someone nearby.
+  Future<bool> setDriverOnline({
+    required bool isOnline,
+    double? lat,
+    double? lng,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'POST',
+      uri: _backendUri('/drivers/me/status'),
+      body: {
+        'is_online': isOnline,
+        if (lat != null) 'lat': lat,
+        if (lng != null) 'lng': lng,
+      },
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    return json is Map && (json['is_online'] as bool? ?? isOnline) == isOnline;
+  }
+
+  /// Full driver dashboard payload: identity, stats, cars, services.
+  Future<DriverProfile?> fetchDriverProfile({CancelToken? cancelToken}) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/drivers/me'),
+      timeout: const Duration(seconds: 10),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) return null;
+    return DriverProfile.fromJson(json.cast<String, dynamic>());
+  }
+
+  Future<DriverPricing?> fetchDriverPricing({
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/drivers/me/pricing'),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) return null;
+    return DriverPricing.fromJson(json.cast<String, dynamic>());
+  }
+
+  /// Saves the driver's rate card. Returns the persisted pricing plus sample
+  /// fares, so the UI can preview the effect of the change.
+  Future<({DriverPricing pricing, Map<String, double> examples})?>
+      updateDriverPricing({
+    required DriverPricing pricing,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'PATCH',
+      uri: _backendUri('/drivers/me/pricing'),
+      body: pricing.toJson(),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) return null;
+
+    final pricingJson = json['pricing'];
+    final examplesJson = json['examples'];
+    final examples = <String, double>{};
+    if (examplesJson is Map) {
+      examplesJson.forEach((k, v) {
+        if (v is num) examples['$k'] = v.toDouble();
+      });
+    }
+    return (
+      pricing: pricingJson is Map
+          ? DriverPricing.fromJson(pricingJson.cast<String, dynamic>())
+          : pricing,
+      examples: examples,
+    );
+  }
+
+  Future<List<RideModel>> fetchDriverRides({
+    int limit = 50,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/drivers/me/rides', {'limit': limit}),
+      timeout: const Duration(seconds: 10),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) return const [];
+    final list = json['rides'];
+    if (list is! List) return const [];
+    return list
+        .whereType<Map>()
+        .map((m) => RideModel.fromJson(m.cast<String, dynamic>()))
+        .toList();
+  }
+
+  /// Offer details including the rider's phone number. Used when a `ride_offer`
+  /// arrives over the socket, so the driver can see who they are collecting.
+  Future<RideOfferBrief?> fetchRideBrief({
+    required String rideId,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/rides/$rideId/brief'),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) return null;
+    return RideOfferBrief.fromJson(json.cast<String, dynamic>());
+  }
+
+  // -------------------------------------------------------------------------
+  // Vehicles — "manage cars"
+  // -------------------------------------------------------------------------
+
+  Future<List<VehicleInfo>> fetchDriverVehicles({
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/drivers/me/vehicles'),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) return const [];
+    final list = json['vehicles'];
+    if (list is! List) return const [];
+    return list
+        .whereType<Map>()
+        .map((m) => VehicleInfo.fromJson(m.cast<String, dynamic>()))
+        .toList();
+  }
+
+  Future<String?> createDriverVehicle({
+    required VehicleInfo vehicle,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'POST',
+      uri: _backendUri('/drivers/me/vehicles'),
+      body: vehicle.toJson(),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    return json is Map ? json['id'] as String? : null;
+  }
+
+  Future<bool> updateDriverVehicle({
+    required String vehicleId,
+    required VehicleInfo vehicle,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'PATCH',
+      uri: _backendUri('/drivers/me/vehicles/$vehicleId'),
+      body: vehicle.toJson(),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    return json is Map;
+  }
+
+  Future<bool> deleteDriverVehicle({
+    required String vehicleId,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'DELETE',
+      uri: _backendUri('/drivers/me/vehicles/$vehicleId'),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    return json is Map;
+  }
+
+  // -------------------------------------------------------------------------
+  // Services
+  // -------------------------------------------------------------------------
+
+  Future<List<DriverService>> fetchDriverServices({
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/drivers/me/services'),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    if (json is! Map) return const [];
+    final list = json['services'];
+    if (list is! List) return const [];
+    return list
+        .whereType<Map>()
+        .map((m) => DriverService.fromJson(m.cast<String, dynamic>()))
+        .toList();
+  }
+
+  Future<String?> createDriverService({
+    required DriverService service,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'POST',
+      uri: _backendUri('/drivers/me/services'),
+      body: service.toJson(),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    return json is Map ? json['id'] as String? : null;
+  }
+
+  Future<bool> updateDriverService({
+    required String serviceId,
+    required DriverService service,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'PATCH',
+      uri: _backendUri('/drivers/me/services/$serviceId'),
+      body: service.toJson(),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    return json is Map;
+  }
+
+  Future<bool> deleteDriverService({
+    required String serviceId,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'DELETE',
+      uri: _backendUri('/drivers/me/services/$serviceId'),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+    return json is Map;
+  }
+
   Future<List<NearbyDriver>> getNearbyDrivers({
     required double lat,
     required double lng,
     double radiusKm = 10,
     int limit = 20,
     CancelToken? cancelToken,
+    double? tripDistanceMeters,
+    double? tripDurationSeconds,
   }) async {
+    final query = <String, String>{
+      'lat': '$lat',
+      'lon': '$lng',
+      'radius_km': '$radiusKm',
+      'limit': '$limit',
+    };
+    if (tripDistanceMeters != null) {
+      query['trip_distance_meters'] = '$tripDistanceMeters';
+      query['trip_duration_seconds'] = '${tripDurationSeconds ?? 0}';
+    }
+
     final json = await _send(
       method: 'GET',
-      uri: _backendUri('/drivers', {
-        'lat': lat,
-        'lon': lng,
-        'radius_km': radiusKm,
-        'limit': limit,
-      }),
+      uri: _backendUri('/drivers', query),
       timeout: const Duration(seconds: 8),
       cancelToken: cancelToken,
     );
@@ -785,9 +1246,16 @@ class ApiClient {
 
     try {
       final decoded = jsonDecode(response.body);
-      if (decoded is Map && decoded['message'] is String) {
-        final serverMessage = decoded['message'] as String;
-        if (serverMessage.isNotEmpty) message = serverMessage;
+      if (decoded is Map) {
+        final serverMessage =
+            decoded['detail'] is String
+                ? decoded['detail'] as String
+                : decoded['message'] is String
+                ? decoded['message'] as String
+                : null;
+        if (serverMessage != null && serverMessage.isNotEmpty) {
+          message = serverMessage;
+        }
       }
     } catch (_) {}
 
@@ -1057,6 +1525,59 @@ class GeocodeResult {
   LatLng get coords => LatLng(lat, lng);
 }
 
+/// The rider's live position while the driver is on the way to pickup.
+@immutable
+class RiderLocation {
+  const RiderLocation({
+    required this.riderId,
+    required this.state,
+    required this.pickup,
+    this.liveLat,
+    this.liveLng,
+    this.accuracy,
+    this.ageSeconds,
+  });
+
+  final String riderId;
+  final String state;
+  final RideLocation pickup;
+
+  /// The rider's most recent fix. Null until one lands, or once it goes stale.
+  final double? liveLat;
+  final double? liveLng;
+  final double? accuracy;
+  final double? ageSeconds;
+
+  /// True while the rider's position is being reported and still fresh.
+  bool get hasLiveFix => liveLat != null && liveLng != null;
+
+  /// Where to put the rider's pin: their live position when we have one,
+  /// otherwise the point the ride was booked against.
+  LatLng get marker => hasLiveFix
+      ? LatLng(liveLat!, liveLng!)
+      : LatLng(pickup.lat, pickup.lng);
+
+  static RiderLocation fromJson(Map<String, dynamic> json) {
+    final pickupJson = json['pickup'];
+    final pickup = pickupJson is Map
+        ? RideLocation.fromJson(pickupJson.cast<String, dynamic>())
+        : const RideLocation(lat: 0, lng: 0);
+
+    final live = json['live'];
+    final m = live is Map ? live.cast<String, dynamic>() : null;
+
+    return RiderLocation(
+      riderId: json['rider_id']?.toString() ?? '',
+      state: json['state']?.toString() ?? 'requested',
+      pickup: pickup,
+      liveLat: (m?['lat'] as num?)?.toDouble(),
+      liveLng: (m?['lng'] as num?)?.toDouble(),
+      accuracy: (m?['accuracy'] as num?)?.toDouble(),
+      ageSeconds: (m?['age_seconds'] as num?)?.toDouble(),
+    );
+  }
+}
+
 @immutable
 class NearbyDriver {
   const NearbyDriver({
@@ -1071,6 +1592,9 @@ class NearbyDriver {
     required this.distanceMeters,
     this.vehicle,
     this.lastSeenAt,
+    this.pricing = const DriverPricing(),
+    this.fareEstimate,
+    this.fareBreakdown,
   });
 
   final String id;
@@ -1085,7 +1609,27 @@ class NearbyDriver {
   final VehicleInfo? vehicle;
   final DateTime? lastSeenAt;
 
+  /// The driver's own rate card, as returned by `GET /drivers`.
+  final DriverPricing pricing;
+
+  /// Server-quoted fare for the trip being priced, when a trip was supplied.
+  final double? fareEstimate;
+  final FareBreakdown? fareBreakdown;
+
   LatLng get coords => LatLng(latitude, longitude);
+  bool get isOnline => true;
+
+  /// Falls back to a client-side quote when the server did not price the trip.
+  double quoteFor({
+    required double distanceMeters,
+    required double durationSeconds,
+  }) {
+    if (fareEstimate != null) return fareEstimate!;
+    return pricing.quote(
+      distanceMeters: distanceMeters,
+      durationSeconds: durationSeconds,
+    );
+  }
 
   static NearbyDriver? fromJson(Map<String, dynamic> json) {
     final lat = (json['latitude'] as num?)?.toDouble();
@@ -1130,7 +1674,25 @@ class NearbyDriver {
       longitude: lng,
       distanceMeters: (json['distance_meters'] as num?)?.toDouble() ?? 0,
       vehicle: vehicle,
+      pricing: _pricingFrom(json['pricing']),
+      fareEstimate: (json['fare_estimate'] as num?)?.toDouble(),
+      fareBreakdown: json['fare_breakdown'] is Map
+          ? FareBreakdown.fromJson(
+              (json['fare_breakdown'] as Map).cast<String, dynamic>())
+          : null,
       lastSeenAt: _parseDate(json['last_seen_at'] ?? json['lastSeenAt']),
+    );
+  }
+
+  static DriverPricing _pricingFrom(dynamic value) {
+    if (value is! Map) return const DriverPricing();
+    final m = value.cast<String, dynamic>();
+    return DriverPricing(
+      baseFare: (m['base_fare'] as num?)?.toDouble() ?? 50,
+      pricePerKm: (m['price_per_km'] as num?)?.toDouble() ?? 25,
+      pricePerMinute: (m['price_per_minute'] as num?)?.toDouble() ?? 3,
+      minimumFare: (m['minimum_fare'] as num?)?.toDouble() ?? 100,
+      currency: m['currency']?.toString() ?? 'KES',
     );
   }
 

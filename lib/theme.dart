@@ -386,6 +386,18 @@ abstract final class AppConstants {
   /// Height of the primary bottom action bar on dashboards.
   static const double actionBarHeight = 92;
 
+  /// Zoom limits shared by every map screen.
+  ///
+  /// OpenStreetMap serves tiles up to a native z19, so the tile layers keep
+  /// drawing that level scaled up past it rather than going blank. Capping the
+  /// camera at 19 itself left very little room: a route fitted to the screen
+  /// often starts at 17, which is only two taps from the ceiling.
+  static const double mapMinZoom = 3;
+  static const double mapMaxZoom = 21;
+
+  /// Highest zoom level for which real tile imagery exists.
+  static const int mapNativeMaxZoom = 19;
+
   /// Standard duration for modal open/close.
   static const Duration sheetDuration = Duration(milliseconds: 260);
 

@@ -107,10 +107,10 @@ class AuthService extends ChangeNotifier {
       final response = await api.post(
         registerPath,
         body: {
-          'full_name': fullName.trim(),
-          'phone': phone.trim(),
-          if (email != null && email.trim().isNotEmpty) 'email': email.trim(),
-          'password': password,
+        'full_name': fullName.trim(),
+        'phone': phone.trim(),
+         'email': email != null && email.trim().isNotEmpty ? email.trim() : null,
+        'password': password,
           'role': role.wire,
         },
       );

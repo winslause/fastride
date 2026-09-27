@@ -72,14 +72,24 @@ class LocationService {
     // 3. Background permission — only ask if explicitly requested
     //    (driver going online). Riders never need it.
     if (requestBackground) {
-      final bg = await perm.Permission.locationAlways.status;
-      if (!bg.isGranted) {
-        final requested = await perm.Permission.locationAlways.request();
-        if (!requested.isGranted) {
-          // Foreground works fine; background is a nice-to-have.
-          // Return ready but let the caller know background is limited.
-          return LocationStatus.readyForegroundOnly;
+      // `permission_handler` has no `locationAlways` implementation on web
+      // and throws UnimplementedError, so skip it there — the browser only
+      // ever grants foreground geolocation.
+      if (kIsWeb) return LocationStatus.readyForegroundOnly;
+
+      try {
+        final bg = await perm.Permission.locationAlways.status;
+        if (!bg.isGranted) {
+          final requested = await perm.Permission.locationAlways.request();
+          if (!requested.isGranted) {
+            // Foreground works fine; background is a nice-to-have.
+            // Return ready but let the caller know background is limited.
+            return LocationStatus.readyForegroundOnly;
+          }
         }
+      } catch (e) {
+        debugPrint('[Location] background permission unavailable: $e');
+        return LocationStatus.readyForegroundOnly;
       }
     }
 
@@ -140,6 +150,19 @@ class LocationService {
   Stream<Position> positionStream({
     bool foregroundOnly = true,
   }) {
+    // `AndroidSettings` and `AppleSettings` both throw on web, where the
+    // browser only understands the platform-neutral `LocationSettings`.
+    if (kIsWeb) {
+      return Geolocator.getPositionStream(
+        locationSettings: LocationSettings(
+          accuracy: accuracy,
+          distanceFilter: distanceFilterMeters.round(),
+        ),
+      ).handleError((Object e, StackTrace s) {
+        debugPrint('[Location] stream error: $e');
+      });
+    }
+
     final settings = AndroidSettings(
       accuracy: accuracy,
       distanceFilter: distanceFilterMeters.round(),
@@ -178,11 +201,28 @@ class LocationService {
   }
 
   /// Open the OS settings page so the user can grant a permission
-  /// they previously denied.
-  Future<bool> openAppSettings() => perm.openAppSettings();
+  /// they previously denied. Not supported on web.
+  Future<bool> openAppSettings() async {
+    if (kIsWeb) return false;
+    try {
+      return await perm.openAppSettings();
+    } catch (e) {
+      debugPrint('[Location] openAppSettings failed: $e');
+      return false;
+    }
+  }
 
   /// Open the OS location-services page (for "GPS is off" state).
-  Future<bool> openLocationSettings() => Geolocator.openLocationSettings();
+  /// Browsers have no such page, so this is a no-op on web.
+  Future<bool> openLocationSettings() async {
+    if (kIsWeb) return false;
+    try {
+      return await Geolocator.openLocationSettings();
+    } catch (e) {
+      debugPrint('[Location] openLocationSettings failed: $e');
+      return false;
+    }
+  }
 
   /// Distance between two coordinates in meters.
   double distanceBetween(
