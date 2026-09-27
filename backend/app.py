@@ -239,6 +239,38 @@ def logout(db=Depends(get_db)):
     return {"message": "Logged out successfully"}
 
 
+class PasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.patch("/auth/password")
+def update_password(
+    req: PasswordRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    user_id = current_user["id"]
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT password_hash FROM users WHERE id = %s", (user_id,))
+    row = cur.fetchone()
+    if not row or not verify_password(req.current_password, row["password_hash"]):
+        cur.close()
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if len(req.new_password) < 6:
+        cur.close()
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+    hashed = hash_password(req.new_password)
+    now = datetime.datetime.utcnow()
+    cur.execute(
+        "UPDATE users SET password_hash = %s, updated_at = %s WHERE id = %s",
+        (hashed, now, user_id),
+    )
+    db.commit()
+    cur.close()
+    return {"message": "Password updated successfully"}
+
+
 # =========================================================================
 # Nearby drivers
 # =========================================================================

@@ -2,10 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../core/api_client.dart';
+import '../core/location_service.dart';
 import '../core/websocket_client.dart';
 import '../models/ride_model.dart';
 import '../shared/custom_modal.dart';
@@ -19,17 +22,20 @@ class NavigationSheet extends StatefulWidget {
     required this.ride,
     required this.api,
     this.socket,
+    this.locationService,
   });
 
   final RideModel ride;
   final ApiClient api;
   final WebSocketClient? socket;
+  final LocationService? locationService;
 
   static Future<NavigationOutcome?> show({
     required BuildContext context,
     required RideModel ride,
     required ApiClient api,
     WebSocketClient? socket,
+    LocationService? locationService,
   }) {
     return showGeneralDialog<NavigationOutcome>(
       context: context,
@@ -37,7 +43,7 @@ class NavigationSheet extends StatefulWidget {
       barrierColor: Colors.black,
       transitionDuration: AppConstants.sheetDuration,
       pageBuilder: (_, __, ___) =>
-          NavigationSheet(ride: ride, api: api, socket: socket),
+          NavigationSheet(ride: ride, api: api, socket: socket, locationService: locationService),
       transitionBuilder: (_, anim, __, child) => FadeTransition(
         opacity: CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
         child: child,
@@ -54,18 +60,68 @@ class _NavigationSheetState extends State<NavigationSheet> {
 
   late RideModel _ride;
   late NavigationStage _stage;
+  late final LocationService _location;
+  StreamSubscription<Position>? _posSub;
+  Timer? _locationSyncTimer;
 
   OsrmRoute? _route;
   bool _loadingRoute = false;
   bool _mapReady = false;
   bool _sending = false;
+  LatLng? _driverPosition;
 
   @override
   void initState() {
     super.initState();
     _ride = widget.ride;
     _stage = NavigationStage.toPickup;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadRoute());
+    _location = widget.locationService ?? LocationService();
+    _driverPosition = _currentDriverCoords();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadRoute();
+      _startLocationTracking();
+    });
+  }
+
+  @override
+  void dispose() {
+    _posSub?.cancel();
+    _locationSyncTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _startLocationTracking() async {
+    final status = await _location.ensureReady();
+    if (!status.isUsable) return;
+
+    final pos = await _location.current();
+    if (pos != null) {
+      setState(() {
+        _driverPosition = LatLng(pos.latitude, pos.longitude);
+      });
+    }
+
+    _posSub = _location.positionStream().listen((p) {
+      if (!mounted) return;
+      final here = LatLng(p.latitude, p.longitude);
+      setState(() {
+        _driverPosition = here;
+      });
+    });
+
+    _locationSyncTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      _syncDriverLocation();
+    });
+  }
+
+  Future<void> _syncDriverLocation() async {
+    if (!mounted || _driverPosition == null) return;
+    try {
+      await widget.api.saveLocation(
+        lat: _driverPosition!.latitude,
+        lng: _driverPosition!.longitude,
+      );
+    } catch (_) {}
   }
 
   Future<void> _loadRoute() async {
@@ -113,6 +169,9 @@ class _NavigationSheetState extends State<NavigationSheet> {
   }
 
   LatLng _currentDriverCoords() {
+    if (_driverPosition != null) {
+      return _driverPosition!;
+    }
     final driver = _ride.driver;
     if (driver != null && driver.hasPosition) {
       return LatLng(driver.latitude!, driver.longitude!);
@@ -126,6 +185,9 @@ class _NavigationSheetState extends State<NavigationSheet> {
       final points = route.polyline
           .map<LatLng>((p) => LatLng(p.lat, p.lng))
           .toList(growable: false);
+      if (_driverPosition != null) {
+        points.add(_driverPosition!);
+      }
       _mapController.fitCamera(
         CameraFit.bounds(
           bounds: LatLngBounds.fromPoints(points),
@@ -154,6 +216,7 @@ class _NavigationSheetState extends State<NavigationSheet> {
         );
       });
       HapticFeedback.mediumImpact();
+      _loadRoute();
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -334,6 +397,7 @@ class _NavigationSheetState extends State<NavigationSheet> {
           ),
         MarkerLayer(
           markers: [
+            if (_driverPosition != null) _driverMarker(_driverPosition!, scheme),
             _pin(
               LatLng(_ride.pickup.lat, _ride.pickup.lng),
               scheme.primary,
@@ -371,6 +435,24 @@ class _NavigationSheetState extends State<NavigationSheet> {
           boxShadow: AppTheme.softShadow,
         ),
         child: Icon(icon, size: 20, color: color),
+      ),
+    );
+  }
+
+  Marker _driverMarker(LatLng point, ColorScheme scheme) {
+    return Marker(
+      point: point,
+      width: 32,
+      height: 32,
+      alignment: Alignment.center,
+      child: Container(
+        decoration: BoxDecoration(
+          color: scheme.primary,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 3),
+          boxShadow: AppTheme.softShadow,
+        ),
+        child: const Icon(Icons.motorcycle_rounded, size: 16, color: Colors.white),
       ),
     );
   }

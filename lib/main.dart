@@ -6,7 +6,7 @@ import 'theme.dart';
 import 'feature/auth/auth_gate.dart';
 import 'feature/auth/login_screen.dart';
 import 'feature/auth/register_screen.dart';
-import 'rider/rider_dashboard_view.dart';
+import 'rider/rider_dashboard2.dart';
 import 'rider/profile_screen.dart';
 import 'rider/rides_history_screen.dart';
 import 'driver/driver_dashboard_view.dart';

@@ -104,6 +104,7 @@ class LocationService {
   /// Get the last known position fast (no GPS warm-up).
   /// Returns null if nothing is cached.
   Future<Position?> lastKnown() async {
+    if (kIsWeb) return null;
     try {
       return await Geolocator.getLastKnownPosition();
     } catch (e) {

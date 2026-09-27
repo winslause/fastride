@@ -1,14 +1,14 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
-import 'package:shared_preferences/shared_preferences.dart';
-
 import '../core/api_client.dart';
+import '../core/auth_service.dart';
 import '../core/location_service.dart';
 import '../core/websocket_client.dart';
 import '../models/driver_model.dart';
@@ -27,8 +27,10 @@ class DriverDashboardView extends StatefulWidget {
 
 class _DriverDashboardViewState extends State<DriverDashboardView>
     with WidgetsBindingObserver {
+  // --- Dependencies --------------------------------------------------------
   late final ApiClient _api;
   late final LocationService _location;
+  late AuthService _auth;
   WebSocketClient? _socket;
 
   final MapController _mapController = MapController();
@@ -48,6 +50,7 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
   StreamSubscription<Position>? _posSub;
   StreamSubscription<WsEvent>? _wsSub;
   Timer? _telemetryTimer;
+  Timer? _locationSyncTimer;
   Position? _lastSent;
 
   double _todayEarnings = 0;
@@ -81,6 +84,7 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
     _posSub?.cancel();
     _wsSub?.cancel();
     _telemetryTimer?.cancel();
+    _locationSyncTimer?.cancel();
     _socket?.dispose();
     _api.dispose();
     super.dispose();
@@ -98,6 +102,9 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
   }
 
   Future<void> _bootstrapLocation() async {
+    _auth = AuthService(api: _api);
+    await _auth.initialize();
+
     final status = await _location.ensureReady();
     if (!mounted) return;
 
@@ -117,16 +124,22 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
       _safeMove(here);
     }
 
-    _posSub = _location.positionStream().listen((pos) {
-      if (!mounted) return;
-      final here = LatLng(pos.latitude, pos.longitude);
-      setState(() {
-        _center = here;
-        _myPosition = here;
-        if (pos.heading >= 0) _heading = pos.heading;
-      });
-      _safeMove(here);
+    _locationSyncTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      _syncLocation();
     });
+
+    if (!kIsWeb) {
+      _posSub = _location.positionStream().listen((pos) {
+        if (!mounted) return;
+        final here = LatLng(pos.latitude, pos.longitude);
+        setState(() {
+          _center = here;
+          _myPosition = here;
+          if (pos.heading >= 0) _heading = pos.heading;
+        });
+        _safeMove(here);
+      });
+    }
   }
 
   void _safeMove(LatLng target, {double? zoom}) {
@@ -154,6 +167,18 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
         ),
       ),
     );
+  }
+
+  Future<void> _syncLocation() async {
+    if (!mounted) return;
+    if (!_auth.isReady || !_auth.isAuthenticated) return;
+    if (_myPosition == null) return;
+    try {
+      await _api.saveLocation(
+        lat: _myPosition!.latitude,
+        lng: _myPosition!.longitude,
+      );
+    } catch (_) {}
   }
 
   Future<void> _toggleOnline() async {
@@ -205,7 +230,7 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
     final socket = WebSocketClient(
       url: const String.fromEnvironment(
         'WS_URL',
-        defaultValue: 'wss://api.example.com/ws',
+        defaultValue: 'ws://127.0.0.1:8000/ws',
       ),
       headers: const {'X-Role': 'driver'},
     );
@@ -362,6 +387,7 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
       ride: ride,
       api: _api,
       socket: _socket,
+      locationService: _location,
     );
 
     if (!mounted) return;
@@ -531,27 +557,36 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
   }
 
   Widget _profileAvatar() {
+    final user = _auth.user;
     return Material(
       color: Theme.of(context).colorScheme.surface,
       shape: const CircleBorder(),
       elevation: 2,
       child: InkWell(
         customBorder: const CircleBorder(),
-        onTap: () async {
-          final prefs = await SharedPreferences.getInstance();
-          if (prefs.getString('fastride.auth.user') == null) {
-            _toast('Sign in to continue');
-            return;
-          }
-          Navigator.of(context).pushReplacementNamed('/driver');
+        onTap: () {
+          HapticFeedback.selectionClick();
+          Navigator.of(context).pushNamed('/profile');
         },
         child: Padding(
           padding: const EdgeInsets.all(10),
-          child: Icon(
-            Icons.person_rounded,
-            size: 22,
-            color: Theme.of(context).colorScheme.onSurface,
-          ),
+          child: user != null
+              ? CircleAvatar(
+                  backgroundColor: Theme.of(context).colorScheme.primary.withValues(alpha: 0.15),
+                  child: Text(
+                    user.initials,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.primary,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 18,
+                    ),
+                  ),
+                )
+              : Icon(
+                  Icons.person_rounded,
+                  size: 22,
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
         ),
       ),
     );
@@ -706,13 +741,12 @@ class _DriverDashboardViewState extends State<DriverDashboardView>
                     );
                   case 2:
                     _toast('Vehicle & documents coming soon');
-                  case 3:
-                    final prefs = await SharedPreferences.getInstance();
-                    if (prefs.getString('fastride.auth.user') == null) {
-                      _toast('Sign in to continue');
-                      return;
-                    }
-                    Navigator.of(context).pushReplacementNamed('/driver');
+                   case 3:
+                     if (_auth.isAuthenticated) {
+                       Navigator.of(context).pushNamed('/profile');
+                     } else {
+                       _toast('Sign in to continue');
+                     }
                 }
               },
               destinations: const [

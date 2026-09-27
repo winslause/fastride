@@ -167,13 +167,9 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   void _startLocationTimer() {
     _locationTimer?.cancel();
     _locationTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      final position = await _location.lastKnown();
-      if (position == null) {
-        try {
-          await _location.current(timeout: const Duration(seconds: 5));
-        } catch (_) {}
-        return;
-      }
+      Position? position = await _location.lastKnown();
+      position ??= await _location.current(timeout: const Duration(seconds: 5));
+      if (position == null) return;
       try {
         await _api.saveLocation(
           lat: position.latitude,

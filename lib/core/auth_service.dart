@@ -185,6 +185,21 @@ class AuthService extends ChangeNotifier {
     }
   }
 
+  Future<void> updatePassword({
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    _setBusy(true);
+    try {
+      await api.updatePassword(
+        currentPassword: currentPassword,
+        newPassword: newPassword,
+      );
+    } finally {
+      _setBusy(false);
+    }
+  }
+
   Future<void> _loadProfile() async {
     final response = await api.get(profilePath);
     if (response is! Map) {

@@ -584,6 +584,23 @@ class ApiClient {
     return UserModel.fromJson(userJson.cast<String, dynamic>());
   }
 
+  Future<void> updatePassword({
+    required String currentPassword,
+    required String newPassword,
+    CancelToken? cancelToken,
+  }) async {
+    await _send(
+      method: 'PATCH',
+      uri: _backendUri('/auth/password'),
+      body: {
+        'current_password': currentPassword,
+        'new_password': newPassword,
+      },
+      timeout: const Duration(seconds: 10),
+      cancelToken: cancelToken,
+    );
+  }
+
   // =========================================================================
   // INTERNALS
   // =========================================================================

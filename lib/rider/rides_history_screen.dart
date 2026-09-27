@@ -110,36 +110,39 @@ class _RidesHistoryScreenState extends State<RidesHistoryScreen> {
       );
     }
 
-    return DefaultTabComponent(
-      children: [
-        _buildTab(
-          theme,
-          scheme,
-          title: 'All rides',
-          rides: _allRides,
-          loading: _loading,
-          error: _error,
-        ),
-        _buildTab(
-          theme,
-          scheme,
-          title: 'Completed',
-          rides: _completedRides,
-          loading: _loading,
-          error: _error,
-          highlightColor: AppTheme.success,
-        ),
-        _buildTab(
-          theme,
-          scheme,
-          title: 'Cancelled',
-          rides: _cancelledRides,
-          loading: _loading,
-          error: _error,
-          highlightColor: AppTheme.danger,
-        ),
-      ],
-      tabLabels: const ['All', 'Completed', 'Cancelled'],
+    return DefaultTabController(
+      length: 3,
+      child: DefaultTabComponent(
+        children: [
+          _buildTab(
+            theme,
+            scheme,
+            title: 'All rides',
+            rides: _allRides,
+            loading: _loading,
+            error: _error,
+          ),
+          _buildTab(
+            theme,
+            scheme,
+            title: 'Completed',
+            rides: _completedRides,
+            loading: _loading,
+            error: _error,
+            highlightColor: AppTheme.success,
+          ),
+          _buildTab(
+            theme,
+            scheme,
+            title: 'Cancelled',
+            rides: _cancelledRides,
+            loading: _loading,
+            error: _error,
+            highlightColor: AppTheme.danger,
+          ),
+        ],
+        tabLabels: const ['All', 'Completed', 'Cancelled'],
+      ),
     );
   }
 
