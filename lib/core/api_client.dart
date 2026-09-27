@@ -7,8 +7,14 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
+import '../models/driver_model.dart';
+import '../models/ride_model.dart';
+import '../models/user_model.dart';
+
 // Re-export LatLng so consumers can import it from this file too.
 export 'package:latlong2/latlong.dart' show LatLng;
+// Re-export VehicleClass and VehicleInfo so consumers can import from here.
+export '../models/driver_model.dart' show VehicleClass, VehicleClassX, VehicleInfo;
 
 /// =========================================================================
 /// ApiClient
@@ -117,6 +123,82 @@ class ApiClient {
   // -------------------------------------------------------------------------
   // OSRM
   // -------------------------------------------------------------------------
+
+  /// Routes through the **backend** `/route` endpoint, which proxies to
+  /// OSRM. Use this instead of [osrmRoute] when the backend is live.
+  Future<OsrmRoute> route({
+    required double fromLat,
+    required double fromLng,
+    required double toLat,
+    required double toLng,
+    String profile = 'driving',
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/route', {
+        'from_lat': fromLat,
+        'from_lng': fromLng,
+        'to_lat': toLat,
+        'to_lng': toLng,
+        'profile': profile,
+      }),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+
+    if (json is! Map) {
+      throw const ApiException(
+        kind: ApiErrorKind.badData,
+        message: 'Route response is incomplete.',
+      );
+    }
+
+    final distance = (json['distance_meters'] as num?)?.toDouble();
+    final duration = (json['duration_seconds'] as num?)?.toDouble();
+    final coordsList = json['polyline'];
+
+    if (distance == null || duration == null) {
+      throw const ApiException(
+        kind: ApiErrorKind.badData,
+        message: 'Route response is incomplete.',
+      );
+    }
+
+    final points = <LatLng>[];
+    if (coordsList is List) {
+      for (final c in coordsList) {
+        if (c is Map) {
+          final lat = (c['lat'] as num?)?.toDouble();
+          final lng = (c['lng'] as num?)?.toDouble();
+          if (lat != null && lng != null) {
+            points.add(LatLng(lat, lng));
+          }
+        }
+      }
+    }
+
+    final segmentsList = json['segments'];
+    final segments = <RouteSegment>[];
+    if (segmentsList is List) {
+      for (final s in segmentsList) {
+        if (s is Map) {
+          final parsed =
+              RouteSegment.fromJson(s.cast<String, dynamic>());
+          if (parsed != null) segments.add(parsed);
+        }
+      }
+    }
+
+    return OsrmRoute(
+      distanceMeters: distance,
+      durationSeconds: duration,
+      polyline: points
+          .map((p) => (lat: p.latitude, lng: p.longitude))
+          .toList(growable: false),
+      segments: segments,
+    );
+  }
 
   Future<OsrmRoute> osrmRoute({
     required double fromLat,
@@ -253,6 +335,108 @@ class ApiClient {
   // Geocoding
   // -------------------------------------------------------------------------
 
+  /// Routes through the **backend** `/search` endpoint, which proxies to
+  /// Photon and caches results in the database. Use this instead of
+  /// [geocode] when the backend is live.
+  Future<List<GeocodeResult>> searchPlaces({
+    required String query,
+    double? biasLat,
+    double? biasLng,
+    int limit = 8,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/search', {
+        'q': query,
+        'lat': biasLat,
+        'lon': biasLng,
+        'limit': limit,
+      }),
+      timeout: const Duration(seconds: 6),
+      cancelToken: cancelToken,
+    );
+
+    if (json is! List) return const [];
+
+    final results = <GeocodeResult>[];
+    for (final item in json) {
+      if (item is! Map) continue;
+      final lat = (item['lat'] as num?)?.toDouble();
+      final lng = (item['lng'] as num?)?.toDouble();
+      if (lat == null || lng == null) continue;
+
+      final label = item['label']?.toString() ?? 'Unknown place';
+      final primary = item['primary']?.toString() ?? label;
+      final secondary = item['secondary']?.toString() ?? '';
+
+      results.add(GeocodeResult(
+        label: label,
+        primary: primary,
+        secondary: secondary,
+        lat: lat,
+        lng: lng,
+      ));
+    }
+    return results;
+  }
+
+  // -------------------------------------------------------------------------
+  // Location
+  // -------------------------------------------------------------------------
+
+  Future<void> saveLocation({
+    required double lat,
+    required double lng,
+    double? accuracy,
+    CancelToken? cancelToken,
+  }) async {
+    await _send(
+      method: 'POST',
+      uri: _backendUri('/location'),
+      body: {
+        'lat': lat,
+        'lng': lng,
+        if (accuracy != null) 'accuracy': accuracy,
+      },
+      timeout: const Duration(seconds: 6),
+      cancelToken: cancelToken,
+    );
+  }
+
+  Future<List<NearbyDriver>> getNearbyDrivers({
+    required double lat,
+    required double lng,
+    double radiusKm = 10,
+    int limit = 20,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/drivers', {
+        'lat': lat,
+        'lon': lng,
+        'radius_km': radiusKm,
+        'limit': limit,
+      }),
+      timeout: const Duration(seconds: 8),
+      cancelToken: cancelToken,
+    );
+
+    if (json is! Map) return const [];
+
+    final driversList = json['drivers'];
+    if (driversList is! List) return const [];
+
+    final results = <NearbyDriver>[];
+    for (final item in driversList) {
+      if (item is! Map) continue;
+      final driver = NearbyDriver.fromJson(item.cast<String, dynamic>());
+      if (driver != null) results.add(driver);
+    }
+    return results;
+  }
+
   Future<List<GeocodeResult>> geocode({
     required String query,
     double? biasLat,
@@ -329,6 +513,75 @@ class ApiClient {
     final features = json is Map ? json['features'] : null;
     if (features is! List || features.isEmpty) return null;
     return _parsePhoton(features.first);
+  }
+
+  // -------------------------------------------------------------------------
+  // Rides
+  // -------------------------------------------------------------------------
+
+  Future<List<RideHistoryItem>> getRideHistory({
+    String? status,
+    int limit = 50,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'GET',
+      uri: _backendUri('/rides', {
+        if (status != null) 'status': status,
+        'limit': limit,
+      }),
+      timeout: const Duration(seconds: 10),
+      cancelToken: cancelToken,
+    );
+
+    if (json is! List) return const [];
+
+    final results = <RideHistoryItem>[];
+    for (final item in json) {
+      if (item is Map) {
+        final parsed = RideHistoryItem.fromJson(
+          item.cast<String, dynamic>(),
+        );
+        if (parsed != null) results.add(parsed);
+      }
+    }
+    return results;
+  }
+
+  Future<UserModel> updateProfile({
+    String? fullName,
+    String? phone,
+    String? email,
+    CancelToken? cancelToken,
+  }) async {
+    final json = await _send(
+      method: 'PATCH',
+      uri: _backendUri('/auth/profile'),
+      body: {
+        if (fullName != null) 'full_name': fullName,
+        if (phone != null) 'phone': phone,
+        if (email != null) 'email': email,
+      },
+      timeout: const Duration(seconds: 10),
+      cancelToken: cancelToken,
+    );
+
+    if (json is! Map) {
+      throw const ApiException(
+        kind: ApiErrorKind.badData,
+        message: 'Profile response is incomplete.',
+      );
+    }
+
+    final userJson = json['user'];
+    if (userJson is! Map) {
+      throw const ApiException(
+        kind: ApiErrorKind.badData,
+        message: 'Profile response is incomplete.',
+      );
+    }
+
+    return UserModel.fromJson(userJson.cast<String, dynamic>());
   }
 
   // =========================================================================
@@ -628,6 +881,127 @@ class ApiClient {
   }
 }
 
+class RideHistoryItem {
+  const RideHistoryItem({
+    required this.id,
+    required this.state,
+    this.fareEstimate,
+    this.fareFinal,
+    this.currency = 'KES',
+    this.distanceMeters,
+    this.durationSeconds,
+    this.pickupPlace,
+    this.dropoffPlace,
+    this.requestedAt,
+    this.completedAt,
+    this.cancelledAt,
+    this.driverName,
+    this.driverRating,
+  });
+
+  final String id;
+  final String state;
+  final double? fareEstimate;
+  final double? fareFinal;
+  final String currency;
+  final double? distanceMeters;
+  final double? durationSeconds;
+  final String? pickupPlace;
+  final String? dropoffPlace;
+  final DateTime? requestedAt;
+  final DateTime? completedAt;
+  final DateTime? cancelledAt;
+  final String? driverName;
+  final double? driverRating;
+
+  String get displayFare {
+    final value = fareFinal ?? fareEstimate;
+    if (value == null) return '—';
+    final symbol = CurrencySymbols.of(currency);
+    return '$symbol${value.toStringAsFixed(0)}';
+  }
+
+  String get displayDistance {
+    final m = distanceMeters;
+    if (m == null) return '—';
+    if (m < 1000) return '${m.round()} m';
+    return '${(m / 1000).toStringAsFixed(1)} km';
+  }
+
+  String get displayDuration {
+    final s = durationSeconds;
+    if (s == null) return '—';
+    final m = (s / 60).round();
+    if (m < 1) return '<1 min';
+    if (m < 60) return '$m min';
+    final h = m ~/ 60;
+    final r = m % 60;
+    return '${h}h ${r.toString().padLeft(2, '0')}m';
+  }
+
+  String get stateLabel {
+    switch (state) {
+      case 'completed':
+        return 'Completed';
+      case 'cancelled':
+        return 'Cancelled';
+      case 'accepted':
+        return 'Driver assigned';
+      case 'ongoing':
+        return 'On trip';
+      case 'matching':
+        return 'Matching';
+      case 'requested':
+        return 'Finding driver';
+      case 'driver_arriving':
+        return 'Driver arriving';
+      case 'driver_arrived':
+        return 'Driver arrived';
+      default:
+        return state;
+    }
+  }
+
+  static RideHistoryItem? fromJson(Map<String, dynamic> json) {
+    return RideHistoryItem(
+      id: json['id']?.toString() ?? '',
+      state: json['state']?.toString() ?? 'unknown',
+      fareEstimate:
+          (json['fare_estimate'] as num?)?.toDouble(),
+      fareFinal:
+          (json['fare_final'] as num?)?.toDouble(),
+      currency: json['currency']?.toString() ?? 'KES',
+      distanceMeters:
+          (json['distance_meters'] as num?)?.toDouble(),
+      durationSeconds:
+          (json['duration_seconds'] as num?)?.toDouble(),
+      pickupPlace: json['pickup_place']?.toString(),
+      dropoffPlace: json['dropoff_place']?.toString(),
+      requestedAt: _parseDate(json['requested_at']),
+      completedAt: _parseDate(json['completed_at']),
+      cancelledAt: _parseDate(json['cancelled_at']),
+      driverName: json['driver_name']?.toString(),
+      driverRating: (json['driver_rating'] as num?)?.toDouble(),
+    );
+  }
+
+  static DateTime? _parseDate(dynamic value) {
+    if (value == null) return null;
+    if (value is DateTime) return value;
+    if (value is String) {
+      final parsed = DateTime.tryParse(value);
+      if (parsed != null) return parsed;
+    }
+    if (value is int) {
+      if (value > 100000000000) {
+        return DateTime.fromMillisecondsSinceEpoch(value);
+      }
+      return DateTime.fromMillisecondsSinceEpoch(value * 1000);
+    }
+    return null;
+  }
+}
+
 // =========================================================================
 // Support types
 // =========================================================================
@@ -638,11 +1012,13 @@ class OsrmRoute {
     required this.distanceMeters,
     required this.durationSeconds,
     required this.polyline,
+    this.segments = const [],
   });
 
   final double distanceMeters;
   final double durationSeconds;
   final List<({double lat, double lng})> polyline;
+  final List<RouteSegment> segments;
 }
 
 @immutable
@@ -664,10 +1040,149 @@ class GeocodeResult {
   LatLng get coords => LatLng(lat, lng);
 }
 
+@immutable
+class NearbyDriver {
+  const NearbyDriver({
+    required this.id,
+    required this.fullName,
+    required this.phone,
+    required this.rating,
+    required this.totalTrips,
+    required this.isVerified,
+    required this.latitude,
+    required this.longitude,
+    required this.distanceMeters,
+    this.vehicle,
+    this.lastSeenAt,
+  });
+
+  final String id;
+  final String fullName;
+  final String phone;
+  final double rating;
+  final int totalTrips;
+  final bool isVerified;
+  final double latitude;
+  final double longitude;
+  final double distanceMeters;
+  final VehicleInfo? vehicle;
+  final DateTime? lastSeenAt;
+
+  LatLng get coords => LatLng(latitude, longitude);
+
+  static NearbyDriver? fromJson(Map<String, dynamic> json) {
+    final lat = (json['latitude'] as num?)?.toDouble();
+    final lng = (json['longitude'] as num?)?.toDouble();
+    if (lat == null || lng == null) return null;
+
+    final vehicleJson = json['vehicle'];
+    VehicleInfo? vehicle;
+    if (vehicleJson is Map) {
+      final casted = vehicleJson.cast<String, dynamic>();
+      final make = casted['make']?.toString() ?? '';
+      final model = casted['model']?.toString() ?? '';
+      final plate = casted['plate_number']?.toString() ?? '';
+      if (make.isNotEmpty || model.isNotEmpty || plate.isNotEmpty) {
+        vehicle = VehicleInfo(
+          make: make,
+          model: model,
+          plateNumber: plate,
+          color: casted['color']?.toString(),
+          year: (casted['year'] as num?)?.toInt(),
+          vehicleClass: VehicleClassX.fromString(
+            casted['vehicle_class']?.toString() ??
+                casted['class']?.toString(),
+          ),
+          seats: (casted['seats'] as num?)?.toInt() ?? 4,
+          photoUrl: casted['photo_url']?.toString() ??
+              casted['image']?.toString(),
+        );
+      }
+    }
+
+    return NearbyDriver(
+      id: json['id']?.toString() ?? '',
+      fullName: json['full_name']?.toString() ??
+          json['name']?.toString() ??
+          '',
+      phone: json['phone']?.toString() ?? '',
+      rating: (json['rating'] as num?)?.toDouble() ?? 5.0,
+      totalTrips: (json['total_trips'] as num?)?.toInt() ?? 0,
+      isVerified: json['is_verified'] as bool? ?? false,
+      latitude: lat,
+      longitude: lng,
+      distanceMeters: (json['distance_meters'] as num?)?.toDouble() ?? 0,
+      vehicle: vehicle,
+      lastSeenAt: _parseDate(json['last_seen_at'] ?? json['lastSeenAt']),
+    );
+  }
+
+  static DateTime? _parseDate(dynamic value) {
+    if (value == null) return null;
+    if (value is DateTime) return value;
+    if (value is String) {
+      return DateTime.tryParse(value);
+    }
+    if (value is int) {
+      if (value > 100000000000) {
+        return DateTime.fromMillisecondsSinceEpoch(value);
+      }
+      return DateTime.fromMillisecondsSinceEpoch(value * 1000);
+    }
+    return null;
+  }
+}
+
 class CancelToken {
   bool _cancelled = false;
   bool get isCancelled => _cancelled;
   void cancel() => _cancelled = true;
+}
+
+@immutable
+class RouteSegment {
+  const RouteSegment({
+    required this.distanceMeters,
+    required this.durationSeconds,
+    required this.avgSpeedKmh,
+    required this.polyline,
+    this.maneuver,
+  });
+
+  final double distanceMeters;
+  final double durationSeconds;
+  final double avgSpeedKmh;
+  final List<({double lat, double lng})> polyline;
+  final String? maneuver;
+
+  static RouteSegment? fromJson(Map<String, dynamic> json) {
+    final distance = (json['distance_meters'] as num?)?.toDouble();
+    final duration = (json['duration_seconds'] as num?)?.toDouble();
+    if (distance == null || duration == null) return null;
+
+    final avgSpeed = (json['avg_speed_kmh'] as num?)?.toDouble() ?? 0;
+    final coordsList = json['polyline'];
+    final points = <({double lat, double lng})>[];
+    if (coordsList is List) {
+      for (final c in coordsList) {
+        if (c is Map) {
+          final lat = (c['lat'] as num?)?.toDouble();
+          final lng = (c['lng'] as num?)?.toDouble();
+          if (lat != null && lng != null) {
+            points.add((lat: lat, lng: lng));
+          }
+        }
+      }
+    }
+
+    return RouteSegment(
+      distanceMeters: distance,
+      durationSeconds: duration,
+      avgSpeedKmh: avgSpeed,
+      polyline: points,
+      maneuver: json['maneuver']?.toString(),
+    );
+  }
 }
 
 enum ApiErrorKind {

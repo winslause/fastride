@@ -110,7 +110,7 @@ class _DestinationSheetState extends State<DestinationSheet> {
     });
 
     try {
-      final results = await widget.api.geocode(
+      final results = await widget.api.searchPlaces(
         query: query,
         biasLat: widget.bias?.latitude,
         biasLng: widget.bias?.longitude,

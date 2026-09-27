@@ -69,6 +69,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
   StreamSubscription<WsEvent>? _wsSub;
   StreamSubscription<Position>? _posSub;
   CancelToken? _routeCancel;
+  Timer? _locationTimer;
   bool _mapReady = false;
   bool _routeLoading = false;
   int _navIndex = 0;
@@ -93,7 +94,16 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       ),
     );
     _location = LocationService();
+    _loadAuthToken();
     _bootstrapLocation();
+  }
+
+  Future<void> _loadAuthToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('fastride.auth.token');
+    if (token != null) {
+      _api.authToken = token;
+    }
   }
 
   @override
@@ -102,6 +112,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
     _wsSub?.cancel();
     _posSub?.cancel();
     _routeCancel?.cancel();
+    _locationTimer?.cancel();
     _timeoutTimer?.cancel();
     _api.dispose();
     super.dispose();
@@ -109,11 +120,12 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Pause expensive work while the app is hidden.
     if (state == AppLifecycleState.paused) {
       _posSub?.pause();
+      _locationTimer?.cancel();
     } else if (state == AppLifecycleState.resumed) {
       _posSub?.resume();
+      _startLocationTimer();
     }
   }
 
@@ -148,6 +160,30 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
         _applyPosition(currentPosition, follow: true);
       });
     }
+
+    _startLocationTimer();
+  }
+
+  void _startLocationTimer() {
+    _locationTimer?.cancel();
+    _locationTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      final position = await _location.lastKnown();
+      if (position == null) {
+        try {
+          await _location.current(timeout: const Duration(seconds: 5));
+        } catch (_) {}
+        return;
+      }
+      try {
+        await _api.saveLocation(
+          lat: position.latitude,
+          lng: position.longitude,
+          accuracy: position.accuracy,
+        );
+      } catch (_) {
+        // Silently ignore location save failures.
+      }
+    });
   }
 
   void _applyPosition(Position position, {required bool follow}) {
@@ -173,6 +209,12 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
     } catch (_) {
       // Map may not be attached yet — safe to ignore.
     }
+  }
+
+  Color _trafficColor(double avgSpeedKmh) {
+    if (avgSpeedKmh < 10) return AppTheme.danger;
+    if (avgSpeedKmh < 25) return AppTheme.warning;
+    return AppTheme.success;
   }
 
   void _showLocationBanner(LocationStatus status) {
@@ -261,7 +303,7 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
     _routeCancel = token;
 
     try {
-      final route = await _api.osrmRoute(
+      final route = await _api.route(
         fromLat: from.latitude,
         fromLng: from.longitude,
         toLat: to.latitude,
@@ -507,17 +549,32 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
         ),
         if (_route != null && _route!.polyline.isNotEmpty)
           PolylineLayer(
-            polylines: [
-              Polyline(
-                points: _route!.polyline
-                    .map((p) => LatLng(p.lat, p.lng))
-                    .toList(),
-                strokeWidth: 5,
-                color: Theme.of(context).colorScheme.primary,
-                borderStrokeWidth: 2,
-                borderColor: Colors.white,
-              ),
-            ],
+            polylines: _route!.segments.isNotEmpty
+                ? _route!.segments.asMap().map((i, seg) {
+                    return MapEntry(
+                      i,
+                      Polyline(
+                        points: seg.polyline
+                            .map((p) => LatLng(p.lat, p.lng))
+                            .toList(),
+                        strokeWidth: 5,
+                        color: _trafficColor(seg.avgSpeedKmh),
+                        borderStrokeWidth: 1,
+                        borderColor: Colors.white,
+                      ),
+                    );
+                  }).values.toList()
+                : [
+                    Polyline(
+                      points: _route!.polyline
+                          .map((p) => LatLng(p.lat, p.lng))
+                          .toList(),
+                      strokeWidth: 5,
+                      color: Theme.of(context).colorScheme.primary,
+                      borderStrokeWidth: 2,
+                      borderColor: Colors.white,
+                    ),
+                  ],
           ),
         MarkerLayer(
           markers: [
@@ -599,14 +656,14 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
       elevation: 2,
       child: InkWell(
         customBorder: const CircleBorder(),
-        onTap: () async {
-          final prefs = await SharedPreferences.getInstance();
-          if (prefs.getString('fastride.auth.user') == null) {
-            _toast('Sign in to continue');
-            return;
-          }
-          Navigator.of(context).pushReplacementNamed('/rider');
-        },
+         onTap: () async {
+           final prefs = await SharedPreferences.getInstance();
+           if (prefs.getString('fastride.auth.user') == null) {
+             _toast('Sign in to continue');
+             return;
+           }
+           Navigator.of(context).pushNamed('/profile');
+         },
         child: Padding(
           padding: const EdgeInsets.all(10),
           child: Icon(
@@ -728,16 +785,11 @@ class _RiderDashboardViewState extends State<RiderDashboardView>
                 setState(() => _navIndex = i);
                 switch (i) {
                   case 1:
-                    _toast('Your rides history is coming soon');
+                    Navigator.of(context).pushNamed('/profile/rides');
                   case 2:
                     _toast('Wallet and payments coming soon');
                   case 3:
-                    final prefs = await SharedPreferences.getInstance();
-                    if (prefs.getString('fastride.auth.user') == null) {
-                      _toast('Sign in to continue');
-                      return;
-                    }
-                    Navigator.of(context).pushReplacementNamed('/rider');
+                    Navigator.of(context).pushNamed('/profile');
                 }
               },
               destinations: const [

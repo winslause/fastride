@@ -80,7 +80,7 @@ class _NavigationSheetState extends State<NavigationSheet> {
         : LatLng(_ride.dropoff.lat, _ride.dropoff.lng);
 
     try {
-      final route = await widget.api.osrmRoute(
+      final route = await widget.api.route(
         fromLat: from.latitude,
         fromLng: from.longitude,
         toLat: to.latitude,
@@ -99,10 +99,11 @@ class _NavigationSheetState extends State<NavigationSheet> {
         (lat: to.latitude, lng: to.longitude),
       ];
       final fallback = OsrmRoute(
-        distanceMeters: 0,
-        durationSeconds: 0,
-        polyline: line,
-      );
+          distanceMeters: 0,
+          durationSeconds: 0,
+          polyline: line,
+          segments: const [],
+        );
       setState(() {
         _route = fallback;
         _loadingRoute = false;
@@ -304,17 +305,32 @@ class _NavigationSheetState extends State<NavigationSheet> {
         ),
         if (_route != null && _route!.polyline.isNotEmpty)
           PolylineLayer(
-            polylines: [
-              Polyline(
-                points: _route!.polyline
-                    .map<LatLng>((p) => LatLng(p.lat, p.lng))
-                    .toList(),
-                strokeWidth: 6,
-                color: scheme.primary,
-                borderStrokeWidth: 2,
-                borderColor: Colors.white,
-              ),
-            ],
+            polylines: _route!.segments.isNotEmpty
+                ? _route!.segments.asMap().map((i, seg) {
+                    return MapEntry(
+                      i,
+                      Polyline(
+                        points: seg.polyline
+                            .map<LatLng>((p) => LatLng(p.lat, p.lng))
+                            .toList(),
+                        strokeWidth: 6,
+                        color: _trafficColor(seg.avgSpeedKmh),
+                        borderStrokeWidth: 1,
+                        borderColor: Colors.white,
+                      ),
+                    );
+                  }).values.toList()
+                : [
+                    Polyline(
+                      points: _route!.polyline
+                          .map<LatLng>((p) => LatLng(p.lat, p.lng))
+                          .toList(),
+                      strokeWidth: 6,
+                      color: scheme.primary,
+                      borderStrokeWidth: 2,
+                      borderColor: Colors.white,
+                    ),
+                  ],
           ),
         MarkerLayer(
           markers: [
@@ -357,6 +373,12 @@ class _NavigationSheetState extends State<NavigationSheet> {
         child: Icon(icon, size: 20, color: color),
       ),
     );
+  }
+
+  Color _trafficColor(double avgSpeedKmh) {
+    if (avgSpeedKmh < 10) return const Color(0xFFE53935); // Red (heavy traffic)
+    if (avgSpeedKmh < 25) return const Color(0xFFFF9800); // Orange (moderate)
+    return const Color(0xFF43A047); // Green (free flowing)
   }
 
   Widget _buildTopBar() {

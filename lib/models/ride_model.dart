@@ -17,7 +17,7 @@ class RideModel {
     this.vehicleClass = VehicleClass.standard,
     this.fareEstimate,
     this.fareFinal,
-    this.currency = 'USD',
+    this.currency = 'KES',
     this.distanceMeters,
     this.durationSeconds,
     this.polyline = const [],
@@ -519,10 +519,10 @@ class RideLocation {
 }
 
 abstract final class FareCalculator {
-  static const double basePrice = 200.0;
-  static const double perKmRate = 50.0;
-  static const double perMinuteRate = 5.0;
-  static const double minimumFare = 250.0;
+  static const double basePrice = 50.0;
+  static const double perKmRate = 25.0;
+  static const double perMinuteRate = 3.0;
+  static const double minimumFare = 100.0;
 
   static double calculate({
     required double distanceMeters,

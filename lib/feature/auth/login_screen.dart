@@ -72,6 +72,17 @@ class _LoginScreenState extends State<LoginScreen> {
 
       await location.ensureReady();
 
+      final current = await location.current(
+        timeout: const Duration(seconds: 8),
+      );
+      if (current != null) {
+        await api.saveLocation(
+          lat: current.latitude,
+          lng: current.longitude,
+          accuracy: current.accuracy,
+        );
+      }
+
       if (!mounted) return;
       final userRole = auth.user?.role;
       if (userRole == UserRole.driver) {

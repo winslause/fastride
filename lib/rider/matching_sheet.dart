@@ -134,29 +134,57 @@ class _MatchingSheetState extends State<MatchingSheet>
   }
 
   Future<RideModel> _simulateMatch() async {
-    await Future<void>.delayed(const Duration(seconds: 3));
+    await Future<void>.delayed(const Duration(seconds: 1));
 
     final now = DateTime.now();
-    final driver = DriverModel(
-      id: 'drv_${now.millisecondsSinceEpoch}',
-      fullName: 'Samuel Mwangi',
-      phone: '+254712345678',
-      rating: 4.9,
-      totalTrips: 1284,
-      isVerified: true,
-      isOnline: true,
-      latitude: widget.pickup.lat + 0.0035,
-      longitude: widget.pickup.lng + 0.0028,
-      lastSeenAt: now,
-      vehicle: const VehicleInfo(
-        make: 'Toyota',
-        model: 'Corolla',
-        plateNumber: 'KDA 123A',
-        color: 'Silver',
-        year: 2019,
-        vehicleClass: VehicleClass.standard,
-      ),
+
+    final drivers = await widget.api.getNearbyDrivers(
+      lat: widget.pickup.lat,
+      lng: widget.pickup.lng,
+      radiusKm: 10,
+      limit: 20,
     );
+
+    NearbyDriver? driver;
+    if (drivers.isNotEmpty) {
+      drivers.sort((a, b) => a.distanceMeters.compareTo(b.distanceMeters));
+      driver = drivers.first;
+    }
+
+    final driverModel = driver != null
+        ? DriverModel(
+            id: driver.id,
+            fullName: driver.fullName,
+            phone: driver.phone,
+            rating: driver.rating,
+            totalTrips: driver.totalTrips,
+            isVerified: driver.isVerified,
+            isOnline: true,
+            latitude: driver.latitude,
+            longitude: driver.longitude,
+            lastSeenAt: driver.lastSeenAt,
+            vehicle: driver.vehicle,
+          )
+        : DriverModel(
+            id: 'drv_fallback_${now.millisecondsSinceEpoch}',
+            fullName: 'Samuel Mwangi',
+            phone: '+254712345678',
+            rating: 4.9,
+            totalTrips: 1284,
+            isVerified: true,
+            isOnline: true,
+            latitude: widget.pickup.lat + 0.0035,
+            longitude: widget.pickup.lng + 0.0028,
+            lastSeenAt: now,
+            vehicle: const VehicleInfo(
+              make: 'Toyota',
+              model: 'Corolla',
+              plateNumber: 'KDA 123A',
+              color: 'Silver',
+              year: 2019,
+              vehicleClass: VehicleClass.standard,
+            ),
+          );
 
     return RideModel(
       id: 'ride_${now.millisecondsSinceEpoch}',
@@ -164,11 +192,11 @@ class _MatchingSheetState extends State<MatchingSheet>
       state: RideState.accepted,
       pickup: widget.pickup,
       dropoff: widget.dropoff,
-      driverId: driver.id,
-      driver: driver,
+      driverId: driverModel.id,
+      driver: driverModel,
       vehicleClass: widget.vehicleClass,
       fareEstimate: widget.fare,
-      currency: 'USD',
+      currency: 'KES',
       distanceMeters: widget.distanceMeters,
       durationSeconds: widget.durationSeconds,
       requestedAt: now.subtract(const Duration(seconds: 3)),

@@ -7,6 +7,8 @@ import 'feature/auth/auth_gate.dart';
 import 'feature/auth/login_screen.dart';
 import 'feature/auth/register_screen.dart';
 import 'rider/rider_dashboard_view.dart';
+import 'rider/profile_screen.dart';
+import 'rider/rides_history_screen.dart';
 import 'driver/driver_dashboard_view.dart';
 
 void main() async {
@@ -154,6 +156,10 @@ abstract final class AppRouter {
         return _fadeRoute(const RiderDashboardView());
       case AppRoutes.driver:
         return _fadeRoute(const DriverDashboardView());
+      case AppRoutes.profile:
+        return _fadeRoute(const ProfileScreen());
+      case '/profile/rides':
+        return _fadeRoute(const RidesHistoryScreen());
       default:
         return _fadeRoute(
           _UnknownRouteScreen(routeName: settings.name ?? 'unknown'),

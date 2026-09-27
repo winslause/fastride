@@ -358,13 +358,13 @@ class _FareSelectSheetState extends State<FareSelectSheet> {
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Text(
-                    CurrencySymbols.of('USD') + fare.toStringAsFixed(2),
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w800,
-                      color: scheme.onSurface,
-                    ),
-                  ),
+                   Text(
+                     CurrencySymbols.of('KES') + fare.toStringAsFixed(0),
+                     style: theme.textTheme.titleMedium?.copyWith(
+                       fontWeight: FontWeight.w800,
+                       color: scheme.onSurface,
+                     ),
+                   ),
                   Text(
                     _etaFor(c),
                     style: theme.textTheme.bodySmall?.copyWith(
